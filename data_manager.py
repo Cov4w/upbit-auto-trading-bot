@@ -404,6 +404,9 @@ class ModelLearner:
             class_map = {c: i for i, c in enumerate(unique_classes)}
             y = y.map(class_map)
         
+        # 🛡️ NaN 처리 (학습 전 결측치 0으로 대체)
+        X.fillna(0, inplace=True)
+        
         # Train-Test Split (클래스가 충분하면 stratify 사용)
         try:
             # 각 클래스별 최소 2개 이상 있어야 stratify 가능
@@ -537,6 +540,9 @@ class ModelLearner:
         
         # 특징 순서 맞추기
         features = features[expected_features]
+        
+        # 🛡️ NaN 처리 (PCA 오류 방지)
+        features.fillna(0, inplace=True)
         
         # 🔧 Feature Normalization 적용 (학습 시와 동일한 Scaler 사용)
         if self.scaler is not None:
