@@ -1258,40 +1258,54 @@ class TradingBot:
 
     
     def get_account_balance(self) -> Dict:
-        """계좌 잔액 및 모든 보유 포지션 조회"""
+        """계좌 잔액 및 모든 보유 포지션 조회 (원금 대비 수익률 포함)"""
         try:
             # 1. KRW 잔액 (Upbit/Bithumb 공통)
             # 임의의 티커로 호출하여 KRW 잔액 획득 (구조상 KRW는 공통)
             balance_data = self.exchange.get_balance(self.tickers[0] if self.tickers else "BTC")
-            
+
             total_krw = balance_data.get("krw_balance", 0)
             total_value = total_krw
             holdings = []
-            
+
             # 2. 선택된 코인들의 보유량 확인
-            # (주의: 실제 거래소 잔액을 다 조회하려면 get_balances() API가 필요하지만, 
+            # (주의: 실제 거래소 잔액을 다 조회하려면 get_balances() API가 필요하지만,
             #  여기서는 선택된 티커들에 대해서만 루프를 돕니다)
             target_tickers = set(self.tickers) | set(self.positions.keys())
-            
+
             for ticker in target_tickers:
                 b_data = self.exchange.get_balance(ticker)
                 coin_amount = b_data.get("coin_balance", 0)
-                
+
                 if coin_amount > 0:
                     current_price = self.exchange.get_current_price(ticker) or 0
                     val = coin_amount * current_price
                     total_value += val
-                    
+
                     holdings.append({
                         "ticker": ticker,
                         "amount": coin_amount,
                         "value": val
                     })
-            
+
+            # 3. 원금 대비 수익률 계산
+            # initial_balance가 없으면 현재 잔액을 초기 자본으로 설정
+            if self.initial_balance is None:
+                self.initial_balance = total_value
+                self.peak_balance = total_value
+                logger.info(f"💰 Initial balance set: {total_value:,.0f} KRW")
+
+            # 수익률 계산
+            profit_amount = total_value - self.initial_balance
+            profit_rate = (profit_amount / self.initial_balance * 100) if self.initial_balance > 0 else 0.0
+
             return {
                 "krw_balance": total_krw,
                 "holdings": holdings,
                 "total_value": total_value,
+                "initial_balance": self.initial_balance,
+                "profit_amount": profit_amount,
+                "profit_rate": profit_rate,
                 "api_ok": True
             }
         except Exception as e:

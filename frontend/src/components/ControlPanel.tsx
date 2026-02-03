@@ -35,6 +35,25 @@ export default function ControlPanel({
             <span className="label">Total Value</span>
             <span className="value">{balance.total_value?.toLocaleString() || 0} KRW</span>
           </div>
+
+          {/* Profit Display */}
+          {balance.initial_balance && (
+            <>
+              <div className="balance-item">
+                <span className="label">Initial Capital</span>
+                <span className="value">{balance.initial_balance?.toLocaleString() || 0} KRW</span>
+              </div>
+              <div className="balance-item profit-item">
+                <span className="label">Profit/Loss</span>
+                <span className={`value ${balance.profit_rate >= 0 ? 'profit' : 'loss'}`}>
+                  {balance.profit_rate >= 0 ? '+' : ''}{balance.profit_amount?.toLocaleString() || 0} KRW
+                  <span className="profit-rate">
+                    ({balance.profit_rate >= 0 ? '+' : ''}{balance.profit_rate?.toFixed(2) || 0}%)
+                  </span>
+                </span>
+              </div>
+            </>
+          )}
         </div>
       )}
 

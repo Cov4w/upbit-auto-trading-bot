@@ -1017,3 +1017,59 @@
 .switch input:checked:hover + .switch-slider {
   filter: brightness(1.1);
 }
+
+/* Balance Info Styles */
+.balance-info {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  margin-bottom: 1.5rem;
+}
+
+.balance-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0.5rem 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.balance-item .label {
+  font-size: 0.9rem;
+  opacity: 0.7;
+  font-weight: 500;
+}
+
+.balance-item .value {
+  font-size: 1rem;
+  font-weight: 600;
+}
+
+/* Profit/Loss Display */
+.balance-item.profit-item {
+  border-bottom: none;
+  padding-top: 0.75rem;
+  border-top: 2px solid rgba(255, 255, 255, 0.1);
+}
+
+.balance-item .value.profit {
+  color: var(--success);
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 0.25rem;
+}
+
+.balance-item .value.loss {
+  color: var(--danger);
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 0.25rem;
+}
+
+.profit-rate {
+  font-size: 0.85rem;
+  opacity: 0.9;
+  font-weight: 700;
+}

@@ -37,10 +37,13 @@ class BotStatus(BaseModel):
 
 
 class AccountBalance(BaseModel):
-    """계좌 잔액 응답 모델"""
+    """계좌 잔액 응답 모델 (원금 대비 수익률 포함)"""
     krw_balance: float
     holdings: List[Dict[str, Any]]
     total_value: float
+    initial_balance: Optional[float] = None
+    profit_amount: Optional[float] = None
+    profit_rate: Optional[float] = None
     api_ok: bool
 
 
