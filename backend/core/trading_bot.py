@@ -27,6 +27,7 @@ import numpy as np
 from .data_manager import TradeMemory, ModelLearner, FeatureEngineer
 from .coin_selector import CoinSelector
 from .exchange_manager import ExchangeManager
+from .capital_manager import CapitalManager
 
 # Load Environment Variables
 load_dotenv()
@@ -102,7 +103,10 @@ class TradingBot:
         # Data & Model Manager
         self.memory = TradeMemory()
         self.learner = ModelLearner()
-        
+
+        # 💰 Capital Manager (입출금 추적)
+        self.capital = CapitalManager()
+
         # 🔥 AI Coin Selector
         self.coin_selector = CoinSelector(self.learner, self.memory, self.exchange)
         self.recommended_coins = []  # 추천 코인 리스트 캐시
@@ -1288,22 +1292,30 @@ class TradingBot:
                         "value": val
                     })
 
-            # 3. 원금 대비 수익률 계산
-            # initial_balance가 없으면 현재 잔액을 초기 자본으로 설정
-            if self.initial_balance is None:
-                self.initial_balance = total_value
+            # 3. 원금 대비 수익률 계산 (입출금 기반)
+            # 입출금 내역으로 원금 계산
+            net_capital = self.capital.get_net_capital()
+
+            # 원금이 0이면 (입출금 내역이 없으면) 현재 자산을 자동 입금 처리
+            if net_capital == 0 and total_value > 0:
+                self.capital.add_deposit(total_value, "자동 감지: 초기 자본")
+                net_capital = total_value
+                logger.info(f"💰 자동 입금 기록: {total_value:,.0f} 원 (초기 자본)")
+
+            # initial_balance는 입출금 기반으로 업데이트
+            self.initial_balance = net_capital
+            if self.peak_balance is None or total_value > self.peak_balance:
                 self.peak_balance = total_value
-                logger.info(f"💰 Initial balance set: {total_value:,.0f} KRW")
 
             # 수익률 계산
-            profit_amount = total_value - self.initial_balance
-            profit_rate = (profit_amount / self.initial_balance * 100) if self.initial_balance > 0 else 0.0
+            profit_amount = total_value - net_capital
+            profit_rate = (profit_amount / net_capital * 100) if net_capital > 0 else 0.0
 
             return {
                 "krw_balance": total_krw,
                 "holdings": holdings,
                 "total_value": total_value,
-                "initial_balance": self.initial_balance,
+                "initial_balance": net_capital,
                 "profit_amount": profit_amount,
                 "profit_rate": profit_rate,
                 "api_ok": True

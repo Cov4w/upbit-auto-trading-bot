@@ -15,38 +15,38 @@ export default function StatusCard({ status, positions }: StatusCardProps) {
 
   return (
     <div className="card status-card">
-      <h2>📊 Bot Status</h2>
+      <h2>📊 봇 상태</h2>
 
       <div className="metrics-grid">
         <div className="metric">
-          <span className="label">Status</span>
+          <span className="label">상태</span>
           <span className={`value ${status.is_running ? 'running' : 'stopped'}`}>
-            {status.is_running ? '🟢 Running' : '🔴 Stopped'}
+            {status.is_running ? '🟢 실행중' : '🔴 중지됨'}
           </span>
         </div>
 
         <div className="metric">
-          <span className="label">Model Accuracy</span>
+          <span className="label">모델 정확도</span>
           <span className="value">{(status.model_accuracy * 100).toFixed(1)}%</span>
         </div>
 
         <div className="metric">
-          <span className="label">Total Trades</span>
+          <span className="label">총 거래 수</span>
           <span className="value">{status.total_trades}</span>
         </div>
 
         <div className="metric">
-          <span className="label">Win Rate</span>
+          <span className="label">승률</span>
           <span className="value">{status.win_rate.toFixed(1)}%</span>
         </div>
 
         <div className="metric">
-          <span className="label">Avg Profit</span>
+          <span className="label">평균 수익률</span>
           <span className="value">{status.avg_profit_pct.toFixed(2)}%</span>
         </div>
 
         <div className="metric">
-          <span className="label">Learning Samples</span>
+          <span className="label">학습 데이터</span>
           <span className="value">{status.total_learning_samples}</span>
         </div>
       </div>
@@ -54,7 +54,7 @@ export default function StatusCard({ status, positions }: StatusCardProps) {
       {/* Active Positions */}
       {positions && positions.length > 0 && (
         <div className="positions">
-          <h3>💼 Current Positions ({positions.length})</h3>
+          <h3>💼 현재 포지션 ({positions.length})</h3>
           {positions.map((pos: any) => (
             <div key={pos.ticker} className="position-item">
               <div className="position-header">
@@ -64,8 +64,8 @@ export default function StatusCard({ status, positions }: StatusCardProps) {
                 </span>
               </div>
               <div className="position-details">
-                <span>Entry: {pos.entry_price.toLocaleString()} KRW</span>
-                <span>Current: {pos.current_price?.toLocaleString() || 'N/A'} KRW</span>
+                <span>진입가: {pos.entry_price.toLocaleString()} 원</span>
+                <span>현재가: {pos.current_price?.toLocaleString() || 'N/A'} 원</span>
               </div>
             </div>
           ))}
@@ -74,7 +74,7 @@ export default function StatusCard({ status, positions }: StatusCardProps) {
 
       {/* Active Tickers */}
       <div className="active-tickers">
-        <h3>🎯 Watching</h3>
+        <h3>🎯 감시 중</h3>
         <div className="ticker-list">
           {status.tickers.map((ticker: string) => (
             <span key={ticker} className="ticker-badge">{ticker}</span>

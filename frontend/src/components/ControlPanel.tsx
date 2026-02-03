@@ -22,31 +22,31 @@ export default function ControlPanel({
 }: ControlPanelProps) {
   return (
     <div className="card control-panel">
-      <h2>⚙️ Control Center</h2>
+      <h2>⚙️ 제어 센터</h2>
 
       {/* Balance Info */}
       {balance && (
         <div className="balance-info">
           <div className="balance-item">
-            <span className="label">Available KRW</span>
-            <span className="value">{balance.krw_balance?.toLocaleString() || 0} KRW</span>
+            <span className="label">사용 가능 KRW</span>
+            <span className="value">{balance.krw_balance?.toLocaleString() || 0} 원</span>
           </div>
           <div className="balance-item">
-            <span className="label">Total Value</span>
-            <span className="value">{balance.total_value?.toLocaleString() || 0} KRW</span>
+            <span className="label">총 자산</span>
+            <span className="value">{balance.total_value?.toLocaleString() || 0} 원</span>
           </div>
 
           {/* Profit Display */}
           {balance.initial_balance && (
             <>
               <div className="balance-item">
-                <span className="label">Initial Capital</span>
-                <span className="value">{balance.initial_balance?.toLocaleString() || 0} KRW</span>
+                <span className="label">원금</span>
+                <span className="value">{balance.initial_balance?.toLocaleString() || 0} 원</span>
               </div>
               <div className="balance-item profit-item">
-                <span className="label">Profit/Loss</span>
+                <span className="label">수익/손실</span>
                 <span className={`value ${balance.profit_rate >= 0 ? 'profit' : 'loss'}`}>
-                  {balance.profit_rate >= 0 ? '+' : ''}{balance.profit_amount?.toLocaleString() || 0} KRW
+                  {balance.profit_rate >= 0 ? '+' : ''}{balance.profit_amount?.toLocaleString() || 0} 원
                   <span className="profit-rate">
                     ({balance.profit_rate >= 0 ? '+' : ''}{balance.profit_rate?.toFixed(2) || 0}%)
                   </span>
@@ -64,7 +64,7 @@ export default function ControlPanel({
           onClick={onStart}
           disabled={isRunning}
         >
-          ▶️ Start Bot
+          ▶️ 봇 시작
         </button>
 
         <button
@@ -72,21 +72,21 @@ export default function ControlPanel({
           onClick={onStop}
           disabled={!isRunning}
         >
-          ⏸️ Stop Bot
+          ⏸️ 봇 중지
         </button>
 
         <button
           className="btn btn-info"
           onClick={onUpdateRecommendations}
         >
-          🔄 Update Recommendations
+          🔄 추천 업데이트
         </button>
 
         <button
           className="btn btn-warning"
           onClick={onRetrain}
         >
-          🎓 Retrain AI
+          🎓 AI 재학습
         </button>
       </div>
     </div>
