@@ -38,7 +38,8 @@ class ConnectionManager:
 
         for connection in self.active_connections:
             try:
-                await connection.send_json(message)
+                # datetime 직렬화 문제 해결을 위해 default=str 사용
+                await connection.send_text(json.dumps(message, default=str))
             except Exception as e:
                 logger.error(f"Failed to send message to client: {e}")
                 disconnected.add(connection)
@@ -75,11 +76,12 @@ async def websocket_live_updates(websocket: WebSocket):
         bot = get_bot()
         if bot:
             status = bot.get_status()
-            await websocket.send_json({
+            status = bot.get_status()
+            await websocket.send_text(json.dumps({
                 "type": "status",
                 "data": status,
                 "timestamp": datetime.now().isoformat()
-            })
+            }, default=str))
 
         # 클라이언트로부터 메시지 수신 대기
         while True:
@@ -89,10 +91,10 @@ async def websocket_live_updates(websocket: WebSocket):
 
                 # ping/pong 처리
                 if data == "ping":
-                    await websocket.send_json({
+                    await websocket.send_text(json.dumps({
                         "type": "pong",
                         "timestamp": datetime.now().isoformat()
-                    })
+                    }, default=str))
 
             except asyncio.TimeoutError:
                 # 주기적으로 상태 업데이트 전송
@@ -109,14 +111,14 @@ async def websocket_live_updates(websocket: WebSocket):
                                 prices[ticker] = price
 
                         # 상태 전송
-                        await websocket.send_json({
+                        await websocket.send_text(json.dumps({
                             "type": "update",
                             "data": {
                                 "status": status,
                                 "prices": prices
                             },
                             "timestamp": datetime.now().isoformat()
-                        })
+                        }, default=str))
 
                     except Exception as e:
                         logger.error(f"Error sending update: {e}")
@@ -152,12 +154,12 @@ async def websocket_logs(websocket: WebSocket):
                 await asyncio.sleep(5)
 
                 # 로그 메시지 전송 (실제로는 로그 핸들러에서 가져와야 함)
-                await websocket.send_json({
+                await websocket.send_text(json.dumps({
                     "type": "log",
                     "level": "info",
                     "message": "System is running normally",
                     "timestamp": datetime.now().isoformat()
-                })
+                }, default=str))
 
             except WebSocketDisconnect:
                 break

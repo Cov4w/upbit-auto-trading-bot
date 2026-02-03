@@ -8,6 +8,7 @@ interface ControlPanelProps {
   onStart: () => void;
   onStop: () => void;
   onUpdateRecommendations: () => void;
+  onRetrain: () => void;
   balance: any;
 }
 
@@ -16,6 +17,7 @@ export default function ControlPanel({
   onStart,
   onStop,
   onUpdateRecommendations,
+  onRetrain,
   balance,
 }: ControlPanelProps) {
   return (
@@ -59,6 +61,13 @@ export default function ControlPanel({
           onClick={onUpdateRecommendations}
         >
           🔄 Update Recommendations
+        </button>
+
+        <button
+          className="btn btn-warning"
+          onClick={onRetrain}
+        >
+          🎓 Retrain AI
         </button>
       </div>
     </div>

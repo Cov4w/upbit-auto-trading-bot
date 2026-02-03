@@ -1,13 +1,15 @@
 """
 Pydantic Models for API Request/Response
 """
-from pydantic import BaseModel
+from pydantic import BaseModel, EmailStr, ConfigDict
 from typing import List, Dict, Optional, Any
 from datetime import datetime
 
 
 class BotStatus(BaseModel):
     """봇 상태 응답 모델"""
+    model_config = ConfigDict(protected_namespaces=())
+
     is_running: bool
     tickers: List[str]
     use_ai_selection: bool
@@ -29,6 +31,9 @@ class BotStatus(BaseModel):
     target_profit: Optional[float] = None
     stop_loss: Optional[float] = None
     rebuy_threshold: Optional[float] = None
+    use_net_profit: Optional[bool] = None
+    use_dynamic_target: Optional[bool] = None
+    use_dynamic_sizing: Optional[bool] = None
 
 
 class AccountBalance(BaseModel):
@@ -41,6 +46,8 @@ class AccountBalance(BaseModel):
 
 class Trade(BaseModel):
     """거래 내역 모델"""
+    model_config = ConfigDict(protected_namespaces=())
+
     id: Optional[int]
     ticker: str
     timestamp: str
@@ -92,6 +99,9 @@ class UpdateConfigRequest(BaseModel):
     target_profit: Optional[float] = None
     stop_loss: Optional[float] = None
     rebuy_threshold: Optional[float] = None
+    use_net_profit: Optional[bool] = None
+    use_dynamic_target: Optional[bool] = None
+    use_dynamic_sizing: Optional[bool] = None
 
 
 class TickerToggleRequest(BaseModel):
@@ -125,3 +135,54 @@ class ErrorResponse(BaseModel):
     success: bool = False
     error: str
     detail: Optional[str] = None
+
+
+# ============================================
+# Authentication Schemas
+# ============================================
+
+class UserBase(BaseModel):
+    """Base user model"""
+    username: str
+    email: EmailStr
+    full_name: Optional[str] = None
+
+
+class UserCreate(UserBase):
+    """User registration request"""
+    password: str
+
+
+class UserLogin(BaseModel):
+    """User login request"""
+    username: str
+    password: str
+
+
+class User(UserBase):
+    """User response model"""
+    id: int
+    is_active: bool
+    is_admin: bool
+    created_at: str
+    last_login: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
+
+class Token(BaseModel):
+    """JWT token response"""
+    access_token: str
+    token_type: str
+
+
+class TokenData(BaseModel):
+    """Token payload data"""
+    username: Optional[str] = None
+
+
+class UserWithToken(BaseModel):
+    """User data with authentication token"""
+    user: User
+    token: Token

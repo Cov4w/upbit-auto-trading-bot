@@ -24,6 +24,12 @@ export default function TradingSettings() {
   const [targetProfit, setTargetProfit] = useState(2.0);
   const [stopLoss, setStopLoss] = useState(2.0);
   const [rebuyThreshold, setRebuyThreshold] = useState(1.5);
+
+  // 고급 설정
+  const [useNetProfit, setUseNetProfit] = useState(true);
+  const [useDynamicTarget, setUseDynamicTarget] = useState(false);
+  const [useDynamicSizing, setUseDynamicSizing] = useState(false);
+
   const [isDirty, setIsDirty] = useState(false); // 사용자 수정 여부
 
   // 상태 동기화 (사용자가 수정 중이 아닐 때만)
@@ -33,6 +39,11 @@ export default function TradingSettings() {
       setTargetProfit((statusData.target_profit || 0.02) * 100);
       setStopLoss((statusData.stop_loss || 0.02) * 100);
       setRebuyThreshold((statusData.rebuy_threshold || 0.015) * 100);
+
+      // 고급 설정
+      setUseNetProfit(statusData.use_net_profit ?? true);
+      setUseDynamicTarget(statusData.use_dynamic_target ?? false);
+      setUseDynamicSizing(statusData.use_dynamic_sizing ?? false);
     }
   }, [statusData, isDirty]);
 
@@ -53,6 +64,10 @@ export default function TradingSettings() {
       target_profit: targetProfit / 100, // % to decimal
       stop_loss: stopLoss / 100,
       rebuy_threshold: rebuyThreshold / 100,
+      // 고급 설정
+      use_net_profit: useNetProfit,
+      use_dynamic_target: useDynamicTarget,
+      use_dynamic_sizing: useDynamicSizing,
     });
   };
 
@@ -116,6 +131,81 @@ export default function TradingSettings() {
         </div>
       </div>
 
+      {/* 고급 설정 */}
+      <div className="settings-advanced">
+        <h3>🚀 Advanced Settings</h3>
+        <div className="toggle-list">
+          {/* 순수익 계산 */}
+          <div className="toggle-item">
+            <div className="toggle-info">
+              <label className="toggle-label">
+                💎 Use Net Profit Calculation
+              </label>
+              <p className="toggle-description">
+                수수료(0.1%)를 포함한 실제 순수익으로 계산합니다. 스캘핑 전략 필수 권장.
+              </p>
+            </div>
+            <label className="switch">
+              <input
+                type="checkbox"
+                checked={useNetProfit}
+                onChange={(e) => {
+                  setUseNetProfit(e.target.checked);
+                  setIsDirty(true);
+                }}
+              />
+              <span className="switch-slider"></span>
+            </label>
+          </div>
+
+          {/* 동적 목표 수익률 */}
+          <div className="toggle-item">
+            <div className="toggle-info">
+              <label className="toggle-label">
+                📊 Use Dynamic Target (ATR-based)
+              </label>
+              <p className="toggle-description">
+                변동성(ATR)에 따라 목표 수익률을 자동 조절합니다. 횡보장에서는 낮게, 급등장에서는 높게 설정됩니다.
+              </p>
+            </div>
+            <label className="switch">
+              <input
+                type="checkbox"
+                checked={useDynamicTarget}
+                onChange={(e) => {
+                  setUseDynamicTarget(e.target.checked);
+                  setIsDirty(true);
+                }}
+              />
+              <span className="switch-slider"></span>
+            </label>
+          </div>
+
+          {/* 동적 포지션 사이징 */}
+          <div className="toggle-item">
+            <div className="toggle-info">
+              <label className="toggle-label">
+                🎯 Use Dynamic Sizing (Kelly Criterion)
+              </label>
+              <p className="toggle-description">
+                승률과 확신도에 따라 투자 금액을 자동 조절합니다. 최소 30건의 거래 기록이 필요합니다.
+              </p>
+            </div>
+            <label className="switch">
+              <input
+                type="checkbox"
+                checked={useDynamicSizing}
+                onChange={(e) => {
+                  setUseDynamicSizing(e.target.checked);
+                  setIsDirty(true);
+                }}
+              />
+              <span className="switch-slider"></span>
+            </label>
+          </div>
+        </div>
+      </div>
+
       {/* 설정 슬라이더 */}
       <div className="settings-controls">
         {/* 매수 금액 */}
@@ -125,11 +215,11 @@ export default function TradingSettings() {
             <div className="value-input-group">
               <input
                 type="number"
-                min="5000"
+                min="6000"
                 max="100000"
-                step="1000"
+                step="1"
                 value={tradeAmount}
-                onChange={(e) => handleChange(setTradeAmount, Math.min(100000, Math.max(5000, Number(e.target.value))))}
+                onChange={(e) => handleChange(setTradeAmount, Math.min(100000, Math.max(6000, Number(e.target.value))))}
                 className="value-input"
               />
               <span className="unit">KRW</span>
@@ -137,15 +227,15 @@ export default function TradingSettings() {
           </div>
           <input
             type="range"
-            min="5000"
+            min="6000"
             max="100000"
-            step="1000"
+            step="100"
             value={tradeAmount}
             onChange={(e) => handleChange(setTradeAmount, Number(e.target.value))}
             className="slider"
           />
           <div className="range-labels">
-            <span>5K</span>
+            <span>6K</span>
             <span>50K</span>
             <span>100K</span>
           </div>

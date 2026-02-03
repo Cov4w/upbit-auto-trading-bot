@@ -58,7 +58,16 @@ class TradingBot:
         elif self.exchange_name == 'upbit':
             self.access_key = os.getenv("UPBIT_ACCESS_KEY")
             self.secret_key = os.getenv("UPBIT_SECRET_KEY")
-        
+        else:
+            raise ValueError(f"Unsupported exchange: {self.exchange_name}. Use 'upbit' or 'bithumb'")
+
+        # Validate API credentials
+        if not self.access_key or not self.secret_key:
+            raise ValueError(
+                f"Missing API credentials for {self.exchange_name}. "
+                f"Please set {self.exchange_name.upper()}_ACCESS_KEY and {self.exchange_name.upper()}_SECRET_KEY in .env file"
+            )
+
         # Initialize Exchange Manager
         self.exchange = ExchangeManager(self.exchange_name, self.access_key, self.secret_key)
         
@@ -80,7 +89,13 @@ class TradingBot:
         self.trailing_stop_enabled = True
         self.trailing_activation = 0.015  # 1.5% 수익 시 트레일링 활성화
         self.trailing_distance = 0.01      # peak 대비 -1% 하락 시 매도
-        
+
+        # 🚀 Advanced Profit Logic Configuration
+        self.fee_rate = 0.0005  # 거래소 수수료 (0.05% 편도, 업비트 기준)
+        self.use_net_profit = os.getenv("USE_NET_PROFIT", "true").lower() == "true"  # 순수익 계산 활성화
+        self.use_dynamic_target = os.getenv("USE_DYNAMIC_TARGET", "false").lower() == "true"  # 동적 목표 수익률 활성화
+        self.use_dynamic_sizing = os.getenv("USE_DYNAMIC_SIZING", "false").lower() == "true"  # Kelly Criterion 기반 동적 매수 금액
+
         # Risk Management
         self.max_position_size = float(os.getenv("MAX_POSITION_SIZE", 0.3))
         
@@ -96,6 +111,11 @@ class TradingBot:
         self.is_running = False
         self.positions: Dict[str, Dict] = {}  # {ticker: {position_info}}
         self.thread: Optional[threading.Thread] = None
+
+        # 🔒 Thread Safety Locks
+        self._positions_lock = threading.Lock()
+        self._tickers_lock = threading.Lock()
+        self._recommendations_lock = threading.Lock()
         
         # Performance Metrics (Session)
         self.session_trades = 0
@@ -182,8 +202,8 @@ class TradingBot:
         - Peak 대비 5% 이상 하락 시 봇 중지
         """
         try:
-            # 1. API 호출 제한 (1분마다 체크)
-            if time.time() - self.last_mdd_check < 60:
+            # 1. API 호출 제한 (30초마다 체크 - 급락 대응 개선)
+            if time.time() - self.last_mdd_check < 30:
                 return False
             self.last_mdd_check = time.time()
             
@@ -448,7 +468,17 @@ class TradingBot:
                     del self.failed_buy_cooldown[ticker]
                     logger.info(f"🔓 {ticker} buy cooldown released.")
 
-            # 1. 현재 데이터 수집
+            # 1. 비트코인 상관관계 체크: BTC 하락 시 알트코인 진입 금지
+            if ticker != 'BTC':  # BTC 자체는 체크 안 함
+                btc_df = self.exchange.get_ohlcv('BTC')
+                if btc_df is not None and len(btc_df) >= 10:
+                    # 최근 10봉 BTC 추세 확인
+                    btc_trend = (btc_df['close'].iloc[-1] - btc_df['close'].iloc[-10]) / btc_df['close'].iloc[-10]
+                    if btc_trend < -0.03:  # BTC 3% 이상 하락 중
+                        logger.debug(f"🚫 [{ticker}] BTC declining {btc_trend*100:.1f}%. Skipping altcoin entry.")
+                        return
+
+            # 2. 현재 데이터 수집
             df = self.exchange.get_ohlcv(ticker)
             if df is None or len(df) < 30:
                 return
@@ -459,7 +489,15 @@ class TradingBot:
             if current_price and current_price < MIN_PRICE:
                 logger.debug(f"⚠️ [{ticker}] Price too low ({current_price} KRW), skipping")
                 return
-            
+
+            # 🛡️ 거래량 검증: 최소 24시간 거래량 체크 (슬리피지 방지)
+            MIN_VOLUME_24H = 100_000_000  # 1억원
+            if len(df) >= 24 and current_price:
+                volume_24h = df['volume'].iloc[-24:].sum() * current_price
+                if volume_24h < MIN_VOLUME_24H:
+                    logger.debug(f"⚠️ [{ticker}] 24h volume too low: {volume_24h:,.0f} KRW (min: {MIN_VOLUME_24H:,.0f}), skipping")
+                    return
+
             # 2. 특징 추출
             features = FeatureEngineer.extract_features(df)
             if not features:
@@ -475,25 +513,34 @@ class TradingBot:
             rsi_change = features.get('rsi_change', 0)
             volume_trend = features.get('volume_trend', 0)
             
+            # 🆕 추세 필터: 하락 추세에서 "떨어지는 칼 잡기" 방지
+            ema_9 = features.get('ema_9', 0)
+            ema_21 = features.get('ema_21', 0)
+            price_change_15m = features.get('price_change_15m', 0)
+
+            # 추세 확인: EMA 골든크로스 또는 15분 가격 변화가 -2% 이상 (완만한 하락 또는 상승)
+            trend_up = (ema_9 > ema_21) or (price_change_15m > -0.02)
+
             # ❄️ Hybrid Mode: AI가 없거나 확신이 없어도, 기술적 지표가 강력하면 매수 (데이터 수집 겸용)
-            # 조건: RSI 30 미만(과매도) AND 반등 시작(Change>0) AND 볼린저 하단
-            is_strong_technical_signal = (rsi < 30) and (rsi_change > 0) and (bb_position < 0.2)
-            
+            # 조건: RSI 30 미만(과매도) AND 반등 시작(Change>0) AND 볼린저 하단 AND 추세 필터
+            is_strong_technical_signal = (rsi < 30) and (rsi_change > 0) and (bb_position < 0.2) and trend_up
+
             if is_strong_technical_signal:
-                logger.info(f"💎 Technical Value Buy: {ticker} (RSI={rsi:.1f}, Change={rsi_change:.1f}) - AI Override")
+                logger.info(f"💎 Technical Value Buy: {ticker} (RSI={rsi:.1f}, Change={rsi_change:.1f}, Trend=UP) - AI Override")
                 self._execute_buy(ticker, features, 0.5)  # 확신도 0.5(중립)로 진입
                 return
             
             # 🔧 확신도 기반 시그널 (클래스 수에 상관없이 작동)
             # confidence는 "좋은 수익" 확률 (class 2 또는 class 1)
             ai_profit_signal = confidence > self.confidence_threshold
-            
-            # Mean Reversion 시그널 (과매도 또는 볼린저 하단)
+
+            # Mean Reversion 시그널 (과매도 또는 볼린저 하단) + 추세 필터
             oversold = (rsi < 30) or (bb_position < 0.2)
-            
+            oversold_with_trend = oversold and trend_up  # 🔥 추세 필터 적용
+
             # 🆕 모멘텀 시그널: RSI가 상승 중 (과매도 회복 패턴)
             momentum_signal = (rsi < 40) and (rsi_change > 2)  # RSI 35 이하에서 상승 중
-            
+
             # 🆕 거래량 시그널: 거래량 증가 중
             volume_signal = volume_trend > 0.2  # 거래량 20% 증가
             
@@ -559,15 +606,15 @@ class TradingBot:
                 if ticker not in self.tickers:
                     self.tickers.append(ticker)
             
-            # 🆕 다양화된 매수 조건 (3가지 시나리오)
-            # 시나리오 1: AI가 좋은 수익 예측 + 과매도
-            condition_1 = ai_profit_signal and oversold
-            
-            # 시나리오 2: AI 매우 높은 확신도(90%+) → 과매도 조건 완화
-            condition_2 = confidence > 0.90
-            
-            # 시나리오 3: 과매도 회복 패턴 (RSI 상승 + 거래량 증가)
-            condition_3 = oversold and momentum_signal and volume_signal and (confidence > 0.7)
+            # 🆕 다양화된 매수 조건 (3가지 시나리오) + 추세 필터
+            # 시나리오 1: AI가 좋은 수익 예측 + 과매도 + 추세 필터
+            condition_1 = ai_profit_signal and oversold_with_trend
+
+            # 시나리오 2: AI 매우 높은 확신도(90%+) + 추세 필터 → 과매도 조건 완화
+            condition_2 = (confidence > 0.90) and trend_up
+
+            # 시나리오 3: 과매도 회복 패턴 (RSI 상승 + 거래량 증가) + 추세 필터
+            condition_3 = oversold_with_trend and momentum_signal and volume_signal and (confidence > 0.7)
             
             if condition_1 or condition_2 or condition_3:
                 reason = "AI+Oversold" if condition_1 else ("High Confidence" if condition_2 else "Momentum Recovery")
@@ -588,16 +635,23 @@ class TradingBot:
         🔥 Dynamic Position Sizing (Kelly Criterion)
         확신도와 승률에 따라 투자 금액 동적 조절
         """
+        # 동적 포지션 크기 사용 안 함 -> 고정 금액 반환
+        if not self.use_dynamic_sizing:
+            logger.debug(f"💰 Using fixed trade amount: {self.trade_amount:,.0f} KRW")
+            return max(6002.0, float(self.trade_amount))
+
         try:
             # 1. 통계 데이터 조회
             stats = self.memory.get_statistics()
             win_rate = stats.get('win_rate', 0.0)
             avg_win = stats.get('avg_profit', 0.01)  # 기본 1%
             avg_loss = abs(stats.get('avg_loss', -0.01))
-            
+
             # 통계 신뢰도 부족 시 (데이터 30개 미만) -> 고정 금액
-            if stats.get('total_trades', 0) < 30:
-                return float(self.trade_amount)
+            total_trades = stats.get('total_trades', 0)
+            if total_trades < 30:
+                logger.info(f"📊 Not enough data ({total_trades}/30). Using fixed trade amount: {self.trade_amount:,.0f} KRW")
+                return max(6002.0, float(self.trade_amount))
             
             # 2. Kelly Criterion 계산
             # f* = (p * b - q) / b
@@ -623,20 +677,21 @@ class TradingBot:
             optimal_amount = krw_balance * kelly_fraction * confidence
             
             # 6. 최소/최대 한도 적용
-            min_amount = 5002  # 업비트 최소 주문 5000원 + 여유
-            max_amount = krw_balance * 0.3  # 최대 잔액의 30%까지만
-            
+            min_amount = 6002  # 업비트 최소 주문 6000원 + 여유
+            # 사용자 설정 금액과 잔액의 30% 중 작은 값을 최대 한도로 사용
+            max_amount = min(self.trade_amount, krw_balance * 0.3)
+
             final_amount = max(min_amount, min(optimal_amount, max_amount))
-            
+
             logger.info(
                 f"💰 Position Sizing: {final_amount:,.0f} KRW "
                 f"(Kelly={kelly_fraction:.1%}, Conf={confidence:.1%}, Bal={krw_balance:,.0f})"
             )
             return final_amount
-            
+
         except Exception as e:
             logger.warning(f"⚠️ Position sizing failed: {e}. Using default.")
-            return float(self.trade_amount)
+            return max(6002.0, float(self.trade_amount))
 
     def _execute_buy(self, ticker: str, features: Dict, confidence: float):
         """
@@ -646,13 +701,13 @@ class TradingBot:
             # 💰 Dynamic Position Sizing 적용
             trade_money = self.calculate_position_size(ticker, confidence)
             
-            # 🛡️ 최소 주문 금액 검증 (5,000원)
-            if trade_money < 5000:
+            # 🛡️ 최소 주문 금액 검증 (6,000원)
+            if trade_money < 6000:
                 logger.warning(
                     f"⚠️ Cannot buy {ticker}: Trade amount ({trade_money:,.0f} KRW) "
-                    f"is below minimum (5,000 KRW)."
+                    f"is below minimum (6,000 KRW)."
                 )
-                logger.info("💡 Tip: Increase 'Trade Amount' to at least 5,000 KRW in sidebar.")
+                logger.info("💡 Tip: Increase 'Trade Amount' to at least 6,000 KRW in sidebar.")
                 return
             
             # 1. 현재 가격
@@ -704,6 +759,76 @@ class TradingBot:
         except Exception as e:
             logger.error(f"❌ Buy execution failed: {e}")
     
+    def calculate_net_profit(self, entry_price: float, current_price: float, amount: float) -> float:
+        """
+        수수료를 포함한 순수익률 계산
+
+        Args:
+            entry_price: 매수가
+            current_price: 현재가
+            amount: 수량
+
+        Returns:
+            순수익률 (소수점, 예: 0.02 = 2%)
+        """
+        # 매수 비용 = 진입가 × 수량 + 매수 수수료
+        buy_cost = (entry_price * amount) * (1 + self.fee_rate)
+
+        # 매도 수익 = 현재가 × 수량 - 매도 수수료
+        sell_proceeds = (current_price * amount) * (1 - self.fee_rate)
+
+        # 순수익률 계산
+        net_profit_rate = (sell_proceeds - buy_cost) / buy_cost
+
+        return net_profit_rate
+
+    def calculate_dynamic_target(self, ticker: str, base_target: float = None) -> float:
+        """
+        ATR 기반 변동성에 따른 동적 목표 수익률 계산
+
+        Args:
+            ticker: 티커 심볼
+            base_target: 기본 목표 수익률 (None이면 self.target_profit 사용)
+
+        Returns:
+            동적 목표 수익률 (소수점, 예: 0.035 = 3.5%)
+        """
+        if base_target is None:
+            base_target = self.target_profit
+
+        try:
+            # 최근 OHLCV 데이터 가져오기
+            df = self.exchange.get_ohlcv(ticker)
+            if df is None or len(df) < 14:
+                logger.debug(f"[{ticker}] Insufficient data for dynamic target, using base target")
+                return base_target
+
+            # ATR 추출
+            features = FeatureEngineer.extract_features(df)
+            atr = features.get('atr', 0)
+            current_price = df['close'].iloc[-1]
+
+            if current_price <= 0:
+                return base_target
+
+            # ATR 비율 계산 (현재가 대비 변동폭)
+            volatility_rate = atr / current_price
+
+            # 변동성에 따라 목표 수익률 조정 (가중치 0.5)
+            # 예: 변동성 5% → 목표 2.5% (최소 1%)
+            dynamic_target = max(0.01, volatility_rate * 0.5)
+
+            logger.debug(
+                f"[{ticker}] Dynamic Target: {dynamic_target*100:.2f}% "
+                f"(ATR: {atr:.2f}, Volatility: {volatility_rate*100:.2f}%)"
+            )
+
+            return dynamic_target
+
+        except Exception as e:
+            logger.error(f"Failed to calculate dynamic target for {ticker}: {e}")
+            return base_target
+
     def _check_exit_conditions(self, ticker: str):
         """
         매도 조건 체크 및 청산
@@ -718,14 +843,29 @@ class TradingBot:
             current_price = self.exchange.get_current_price(ticker)
             if not current_price:
                 return
-            
+
             entry_price = position['entry_price']
-            profit_rate = (current_price - entry_price) / entry_price
-            
+            amount = position['amount']
+
+            # 🚀 순수익 계산 (수수료 포함)
+            if self.use_net_profit:
+                profit_rate = self.calculate_net_profit(entry_price, current_price, amount)
+                profit_label = "Net Profit"
+            else:
+                profit_rate = (current_price - entry_price) / entry_price
+                profit_label = "Simple Profit"
+
+            # 🚀 동적 목표 수익률 계산
+            if self.use_dynamic_target:
+                target_profit = self.calculate_dynamic_target(ticker, self.target_profit)
+                position['dynamic_target'] = target_profit  # 포지션에 저장
+            else:
+                target_profit = self.target_profit
+
             # 🔍 디버그: 모든 포지션 상태 출력
             logger.info(
                 f"📊 [{ticker}] Price:{current_price:,.0f}, Entry:{entry_price:,.0f}, "
-                f"Profit:{profit_rate*100:.2f}% (Target:>{self.target_profit*100:.1f}%)"
+                f"{profit_label}:{profit_rate*100:.2f}% (Target:>{target_profit*100:.1f}%)"
             )
             
             # 2. 현재 데이터 수집 (Emergency Check를 위해 미리 로드)
@@ -746,9 +886,9 @@ class TradingBot:
                         return
 
             # 조건 1: 목표 수익률 (Emergency가 아닐 때만 체크)
-            if profit_rate >= self.target_profit:
+            if profit_rate >= target_profit:
                 should_exit = True
-                exit_reason = f"Target Profit ({self.target_profit*100}%)"
+                exit_reason = f"Target Profit ({target_profit*100:.1f}%)"
             
             # 조건 2: 손절
             elif profit_rate <= -self.stop_loss:
@@ -831,7 +971,7 @@ class TradingBot:
                 bid_price = exit_price
             
             estimated_amount = position['amount'] * bid_price
-            min_order_amount = 4990  # KRW (소수점 계산 오차 허용)
+            min_order_amount = 5500  # KRW (6000원 기준, 소수점 계산 오차 허용)
             
             if estimated_amount < min_order_amount:
                 logger.warning(
@@ -926,17 +1066,17 @@ class TradingBot:
         이것이 'Self-Evolving' 메커니즘의 핵심입니다!
         """
         try:
-            # 1. 학습 데이터 로드
+            # 1. 학습 데이터 로드 (🆕 시간 가중치 포함)
             data = self.memory.get_learning_data(min_samples=30)
             if data is None:
                 logger.warning("⚠️ Not enough data for retraining")
                 return
-            
-            X, y = data
-            
-            # 2. 재학습
+
+            X, y, sample_weights = data
+
+            # 2. 재학습 (시간 가중치 적용)
             old_accuracy = self.learner.metrics.get('accuracy', 0)
-            self.learner.retrain_model(X, y)
+            self.learner.retrain_model(X, y, sample_weights)
             new_accuracy = self.learner.metrics.get('accuracy', 0)
             
             # 3. 결과 로깅
@@ -1110,6 +1250,9 @@ class TradingBot:
             "target_profit": self.target_profit,
             "stop_loss": self.stop_loss,
             "rebuy_threshold": self.rebuy_threshold,
+            "use_net_profit": self.use_net_profit,
+            "use_dynamic_target": self.use_dynamic_target,
+            "use_dynamic_sizing": self.use_dynamic_sizing,
         }
 
 

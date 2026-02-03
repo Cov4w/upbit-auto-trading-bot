@@ -6,6 +6,7 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useState, useEffect } from 'react';
 import api from '../api/client';
+import { useAuth } from '../contexts/AuthContext';
 import StatusCard from '../components/StatusCard';
 import ControlPanel from '../components/ControlPanel';
 import TradeHistory from '../components/TradeHistory';
@@ -17,11 +18,12 @@ import '../styles/dashboard.css';
 
 export default function Dashboard() {
   const queryClient = useQueryClient();
+  const { user, logout } = useAuth();
   const [wsConnected, setWsConnected] = useState(false);
   const [currentTime, setCurrentTime] = useState(new Date());
 
   // Queries
-  const { data: statusData, refetch: refetchStatus } = useQuery({
+  const { data: statusData } = useQuery({
     queryKey: ['botStatus'],
     queryFn: async () => {
       const res = await api.bot.getStatus();
@@ -74,6 +76,13 @@ export default function Dashboard() {
       setTimeout(() => {
         queryClient.invalidateQueries({ queryKey: ['recommendations'] });
       }, 3000);
+    },
+  });
+
+  const retrainMutation = useMutation({
+    mutationFn: () => api.bot.retrain(),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['botStatus'] });
     },
   });
 
@@ -130,6 +139,7 @@ export default function Dashboard() {
   const handleStartBot = () => startBotMutation.mutate();
   const handleStopBot = () => stopBotMutation.mutate();
   const handleUpdateRecommendations = () => updateRecommendationsMutation.mutate();
+  const handleRetrain = () => retrainMutation.mutate();
 
   return (
     <div className="dashboard">
@@ -137,6 +147,12 @@ export default function Dashboard() {
       <header className="dashboard-header">
         <h1>🤖 Self-Evolving Trading System</h1>
         <div className="header-status">
+          <span className="user-info">
+            👤 {user?.username || user?.email}
+          </span>
+          <button onClick={logout} className="logout-button">
+            Logout
+          </button>
           <span className={wsConnected ? 'status-dot connected' : 'status-dot'}>
             {wsConnected ? '🟢 Connected' : '🔴 Disconnected'}
           </span>
@@ -153,6 +169,7 @@ export default function Dashboard() {
             onStart={handleStartBot}
             onStop={handleStopBot}
             onUpdateRecommendations={handleUpdateRecommendations}
+            onRetrain={handleRetrain}
             balance={balanceData}
           />
 

@@ -1,4 +1,6 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { AuthProvider } from './contexts/AuthContext';
+import ProtectedRoute from './components/ProtectedRoute';
 import Dashboard from './pages/Dashboard';
 import './App.css';
 
@@ -13,11 +15,15 @@ const queryClient = new QueryClient({
 
 function App() {
   return (
-    <QueryClientProvider client={queryClient}>
-      <div className="App">
-        <Dashboard />
-      </div>
-    </QueryClientProvider>
+    <AuthProvider>
+      <QueryClientProvider client={queryClient}>
+        <div className="App">
+          <ProtectedRoute>
+            <Dashboard />
+          </ProtectedRoute>
+        </div>
+      </QueryClientProvider>
+    </AuthProvider>
   );
 }
 

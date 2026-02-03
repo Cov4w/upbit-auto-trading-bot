@@ -4,7 +4,7 @@ Data Router
 데이터 조회 API (계좌 잔액, 거래 내역, 추천 코인, 차트 데이터 등)
 """
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Depends
 from typing import List, Optional
 import logging
 import sqlite3
@@ -13,12 +13,18 @@ from datetime import datetime
 
 from models.schemas import (
     AccountBalance, TradeHistoryResponse, RecommendationsResponse,
-    CoinRecommendation, OHLCVData, Trade
+    CoinRecommendation, OHLCVData, Trade, User
 )
 
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
+
+def get_current_user():
+    """Import auth dependency to avoid circular imports"""
+    from routers.auth import get_current_user
+    return get_current_user
 
 
 def get_bot():
@@ -30,7 +36,7 @@ def get_bot():
 
 
 @router.get("/balance", response_model=AccountBalance)
-async def get_account_balance():
+async def get_account_balance(current_user: User = Depends(get_current_user)):
     """
     계좌 잔액 조회
 
@@ -50,7 +56,8 @@ async def get_account_balance():
 async def get_trade_history(
     page: int = Query(1, ge=1, description="Page number"),
     page_size: int = Query(20, ge=1, le=100, description="Items per page"),
-    status: Optional[str] = Query(None, description="Filter by status (open/closed)")
+    status: Optional[str] = Query(None, description="Filter by status (open/closed)"),
+    current_user: User = Depends(get_current_user)
 ):
     """
     거래 내역 조회 (페이지네이션)
@@ -66,41 +73,38 @@ async def get_trade_history(
     try:
         bot = get_bot()
 
-        # DB 조회
-        conn = sqlite3.connect(bot.memory.db_path)
+        # DB 조회 (use context manager for safe connection handling)
+        with sqlite3.connect(bot.memory.db_path) as conn:
+            # 전체 개수 (parameterized query for safety)
+            if status:
+                count_query = "SELECT COUNT(*) FROM trades WHERE status = ?"
+                total = pd.read_sql_query(count_query, conn, params=(status,)).iloc[0, 0]
+            else:
+                count_query = "SELECT COUNT(*) FROM trades"
+                total = pd.read_sql_query(count_query, conn).iloc[0, 0]
 
-        # 전체 개수 (parameterized query for safety)
-        if status:
-            count_query = "SELECT COUNT(*) FROM trades WHERE status = ?"
-            total = pd.read_sql_query(count_query, conn, params=(status,)).iloc[0, 0]
-        else:
-            count_query = "SELECT COUNT(*) FROM trades"
-            total = pd.read_sql_query(count_query, conn).iloc[0, 0]
-
-        # 데이터 조회 (parameterized query)
-        if status:
-            query = """
-                SELECT
-                    id, ticker, timestamp, entry_price, exit_price,
-                    profit_rate, is_profitable, model_confidence, status
-                FROM trades
-                WHERE status = ?
-                ORDER BY timestamp DESC
-                LIMIT ? OFFSET ?
-            """
-            df = pd.read_sql_query(query, conn, params=(status, page_size, (page - 1) * page_size))
-        else:
-            query = """
-                SELECT
-                    id, ticker, timestamp, entry_price, exit_price,
-                    profit_rate, is_profitable, model_confidence, status
-                FROM trades
-                ORDER BY timestamp DESC
-                LIMIT ? OFFSET ?
-            """
-            df = pd.read_sql_query(query, conn, params=(page_size, (page - 1) * page_size))
-
-        conn.close()
+            # 데이터 조회 (parameterized query)
+            if status:
+                query = """
+                    SELECT
+                        id, ticker, timestamp, entry_price, exit_price,
+                        profit_rate, is_profitable, model_confidence, status
+                    FROM trades
+                    WHERE status = ?
+                    ORDER BY timestamp DESC
+                    LIMIT ? OFFSET ?
+                """
+                df = pd.read_sql_query(query, conn, params=(status, page_size, (page - 1) * page_size))
+            else:
+                query = """
+                    SELECT
+                        id, ticker, timestamp, entry_price, exit_price,
+                        profit_rate, is_profitable, model_confidence, status
+                    FROM trades
+                    ORDER BY timestamp DESC
+                    LIMIT ? OFFSET ?
+                """
+                df = pd.read_sql_query(query, conn, params=(page_size, (page - 1) * page_size))
 
         # Trade 모델로 변환
         trades = []
@@ -130,7 +134,7 @@ async def get_trade_history(
 
 
 @router.get("/recommendations", response_model=RecommendationsResponse)
-async def get_recommendations():
+async def get_recommendations(current_user: User = Depends(get_current_user)):
     """
     AI 추천 코인 목록 조회
 
@@ -172,7 +176,8 @@ async def get_recommendations():
 @router.get("/ohlcv/{ticker}", response_model=OHLCVData)
 async def get_ohlcv_data(
     ticker: str,
-    interval: str = Query("day", description="Candle interval (minute1, minute3, minute5, day)")
+    interval: str = Query("day", description="Candle interval (minute1, minute3, minute5, day)"),
+    current_user: User = Depends(get_current_user)
 ):
     """
     OHLCV 차트 데이터 조회
@@ -219,7 +224,7 @@ async def get_ohlcv_data(
 
 
 @router.get("/statistics")
-async def get_statistics():
+async def get_statistics(current_user: User = Depends(get_current_user)):
     """
     트레이딩 통계 조회
 
@@ -241,7 +246,7 @@ async def get_statistics():
 
 
 @router.get("/positions")
-async def get_current_positions():
+async def get_current_positions(current_user: User = Depends(get_current_user)):
     """
     현재 보유 포지션 조회
 

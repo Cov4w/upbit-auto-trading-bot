@@ -239,21 +239,21 @@ class TradeMemory:
         except Exception as e:
             logger.error(f"❌ Failed to update trade exit: {e}")
     
-    def get_learning_data(self, min_samples: int = 30, limit: int = 125) -> Optional[Tuple[pd.DataFrame, pd.Series]]:
+    def get_learning_data(self, min_samples: int = 30, limit: int = 500) -> Optional[Tuple[pd.DataFrame, pd.Series, np.ndarray]]:
         """
-        모델 학습용 데이터 반환 (확장 버전 - 16개 특징 + 3단계 라벨)
-        Adaptive Retraining: 최신 데이터 N개만 사용하여 학습
-        
+        모델 학습용 데이터 반환 (시간 가중치 포함)
+        🆕 Time-Weighted Learning: 최근 데이터에 더 높은 가중치 부여
+
         Args:
             min_samples: 최소 데이터 수
-            limit: 최대 데이터 수 (최신 데이터 위주)
-        
+            limit: 최대 데이터 수 (125 → 500으로 증가, 오래된 데이터 삭제하지 않음)
+
         Returns:
-            (X, y): 특징 데이터프레임과 라벨 시리즈
+            (X, y, sample_weights): 특징 데이터프레임, 라벨 시리즈, 샘플 가중치 배열
         """
         with sqlite3.connect(self.db_path) as conn:
-            df = pd.read_sql_query(f"""
-                SELECT 
+            df = pd.read_sql_query("""
+                SELECT
                     rsi, macd, macd_signal, bb_position, volume_ratio,
                     price_change_5m, price_change_15m, ema_9, ema_21, atr,
                     COALESCE(hour_of_day, 12) as hour_of_day,
@@ -262,31 +262,56 @@ class TradeMemory:
                     COALESCE(volume_trend, 0) as volume_trend,
                     COALESCE(rsi_prev_5m, rsi) as rsi_prev_5m,
                     COALESCE(bb_position_prev_5m, bb_position) as bb_position_prev_5m,
-                    COALESCE(profit_class, 
-                        CASE 
+                    COALESCE(profit_class,
+                        CASE
                             WHEN profit_rate < -0.005 THEN 0
                             WHEN profit_rate > 0.005 THEN 2
                             ELSE 1
                         END
-                    ) as profit_class
+                    ) as profit_class,
+                    timestamp
                 FROM trades
                 WHERE status = 'closed' AND is_profitable IS NOT NULL
                 ORDER BY timestamp DESC
-                LIMIT {limit}
-            """, conn)
-            
+                LIMIT ?
+            """, conn, params=(limit,))
+
             # 최신순(DESC)으로 가져왔으므로 다시 시간순(ASC)으로 정렬
             df = df.iloc[::-1].reset_index(drop=True)
-        
+
         if len(df) < min_samples:
             logger.warning(f"⚠️ Insufficient data: {len(df)}/{min_samples}")
             return None
-        
-        X = df.drop('profit_class', axis=1)
-        y = df['profit_class']
-        
+
+        # 🆕 시간 기반 가중치 계산 (Exponential Time Decay)
+        from datetime import datetime as dt
+
+        # timestamp를 datetime으로 변환
+        df['timestamp'] = pd.to_datetime(df['timestamp'])
+
+        # 가장 최근 거래 시간 기준으로 일수 차이 계산
+        latest_time = df['timestamp'].max()
+        df['days_old'] = (latest_time - df['timestamp']).dt.total_seconds() / 86400  # 초 -> 일
+
+        # Exponential decay 가중치 계산
+        # weight = exp(-decay_rate * days_old)
+        # decay_rate = 0.02: 약 35일마다 가중치 절반으로 감소
+        decay_rate = 0.02
+        sample_weights = np.exp(-decay_rate * df['days_old'].values)
+
+        # 최소 가중치 0.1 보장 (완전히 무시되지 않도록)
+        sample_weights = np.maximum(sample_weights, 0.1)
+
         logger.info(f"📊 Learning Data Loaded: {len(df)} samples (16 features, 3-class label)")
-        return X, y
+        logger.info(f"⚖️  Sample Weights: min={sample_weights.min():.3f}, max={sample_weights.max():.3f}, "
+                   f"mean={sample_weights.mean():.3f}")
+        logger.info(f"📅 Data Age Range: {df['days_old'].min():.1f} ~ {df['days_old'].max():.1f} days")
+
+        # timestamp와 days_old 컬럼 제거
+        X = df.drop(['profit_class', 'timestamp', 'days_old'], axis=1)
+        y = df['profit_class']
+
+        return X, y, sample_weights
     
     def get_statistics(self) -> Dict:
         """현재 매매 통계 반환"""
@@ -374,40 +399,55 @@ class ModelLearner:
         self.load_model()
         logger.info("✅ ModelLearner initialized")
     
-    def train_initial_model(self, X: pd.DataFrame, y: pd.Series):
+    def train_initial_model(self, X: pd.DataFrame, y: pd.Series, sample_weights: np.ndarray = None):
         """
         초기 모델 학습 (Cold Start)
-        
-        과거 30일 데이터 또는 최소 30개 샘플로 시작
+        🆕 시간 가중치를 반영한 학습
+
+        Args:
+            X: 특징 데이터
+            y: 라벨
+            sample_weights: 샘플별 가중치 (최근 데이터 우선)
         """
         logger.info("🎓 Starting Initial Model Training...")
-        
+
+        # 🛡️ NaN 처리 (학습 전 결측치 중앙값으로 대체 - Outlier Detection 전에 수행)
+        # 0으로 대체하면 정보 왜곡 가능, 중앙값이 더 안정적
+        X = X.fillna(X.median())
+
         # 🔥 Outlier Detection (이상값 제거)
         original_samples = len(X)
         if original_samples >= 30:  # 충분한 데이터가 있을 때만 적용
             from sklearn.ensemble import IsolationForest
-            
+
             outlier_detector = IsolationForest(
                 contamination=0.1,  # 데이터의 10%를 이상값으로 간주
                 random_state=42,
                 n_jobs=-1
             )
-            
+
             # 이상값 감지 (-1: 이상값, 1: 정상값)
             is_inlier = outlier_detector.fit_predict(X)
-            
+
             # 정상 데이터만 필터링
             X_clean = X[is_inlier == 1]
             y_clean = y[is_inlier == 1]
-            
+
+            # 🆕 가중치도 함께 필터링
+            if sample_weights is not None:
+                sample_weights_clean = sample_weights[is_inlier == 1]
+            else:
+                sample_weights_clean = None
+
             outliers_removed = original_samples - len(X_clean)
             logger.info(f"🧹 Outlier Detection:")
             logger.info(f"   Total Samples: {original_samples}")
             logger.info(f"   Outliers Removed: {outliers_removed} ({outliers_removed/original_samples*100:.1f}%)")
             logger.info(f"   Clean Samples: {len(X_clean)}")
-            
+
             X = X_clean
             y = y_clean
+            sample_weights = sample_weights_clean
         else:
             logger.info(f"⚠️ Skipping outlier detection (need 30+ samples, got {original_samples})")
         
@@ -422,28 +462,44 @@ class ModelLearner:
             # 클래스 리매핑 (0, 2 → 0, 1)
             class_map = {c: i for i, c in enumerate(unique_classes)}
             y = y.map(class_map)
-        
-        # 🛡️ NaN 처리 (학습 전 결측치 0으로 대체)
-        X.fillna(0, inplace=True)
-        
+
         # Train-Test Split (클래스가 충분하면 stratify 사용)
+        # 🆕 sample_weights도 함께 분할
         try:
             # 각 클래스별 최소 2개 이상 있어야 stratify 가능
             can_stratify = all(y.value_counts() >= 2)
             if can_stratify:
-                X_train, X_test, y_train, y_test = train_test_split(
-                    X, y, test_size=0.2, random_state=42, stratify=y
-                )
+                if sample_weights is not None:
+                    X_train, X_test, y_train, y_test, weights_train, weights_test = train_test_split(
+                        X, y, sample_weights, test_size=0.2, random_state=42, stratify=y
+                    )
+                else:
+                    X_train, X_test, y_train, y_test = train_test_split(
+                        X, y, test_size=0.2, random_state=42, stratify=y
+                    )
+                    weights_train, weights_test = None, None
             else:
                 logger.warning("⚠️ Not enough samples per class for stratify. Using random split.")
+                if sample_weights is not None:
+                    X_train, X_test, y_train, y_test, weights_train, weights_test = train_test_split(
+                        X, y, sample_weights, test_size=0.2, random_state=42
+                    )
+                else:
+                    X_train, X_test, y_train, y_test = train_test_split(
+                        X, y, test_size=0.2, random_state=42
+                    )
+                    weights_train, weights_test = None, None
+        except Exception as e:
+            logger.warning(f"⚠️ Stratify failed: {e}. Using random split.")
+            if sample_weights is not None:
+                X_train, X_test, y_train, y_test, weights_train, weights_test = train_test_split(
+                    X, y, sample_weights, test_size=0.2, random_state=42
+                )
+            else:
                 X_train, X_test, y_train, y_test = train_test_split(
                     X, y, test_size=0.2, random_state=42
                 )
-        except Exception as e:
-            logger.warning(f"⚠️ Stratify failed: {e}. Using random split.")
-            X_train, X_test, y_train, y_test = train_test_split(
-                X, y, test_size=0.2, random_state=42
-            )
+                weights_train, weights_test = None, None
         
         # 🔧 Feature Normalization (StandardScaler)
         from sklearn.preprocessing import StandardScaler
@@ -456,7 +512,9 @@ class ModelLearner:
         logger.info("🔧 Feature Normalization Applied (StandardScaler)")
         
         # 🆕 PCA Dimensionality Reduction
-        if self.use_pca:
+        # 🆕 PCA Dimensionality Reduction
+        # 🔥 데이터가 충분할 때만 PCA 적용 (100개 이상)
+        if self.use_pca and len(X_train) >= 100:
             from sklearn.decomposition import PCA
             self.pca = PCA(n_components=self.pca_components)
             X_train_final = self.pca.fit_transform(X_train_scaled)
@@ -466,6 +524,8 @@ class ModelLearner:
             explained_var_ = sum(self.pca.explained_variance_ratio_)
             logger.info(f"🧬 PCA Applied: {X_train.shape[1]} -> {n_features_} features (Var={explained_var_:.1%})")
         else:
+            if self.use_pca:
+                logger.info(f"⚠️ Not enough data for PCA ({len(X_train)} samples). Skipping PCA.")
             self.pca = None
             X_train_final = X_train_scaled
             X_test_final = X_test_scaled
@@ -473,7 +533,7 @@ class ModelLearner:
         # 🆕 XGBoost Multi-Class Model (동적 클래스 수)
         self.model = xgb.XGBClassifier(
             n_estimators=100,
-            max_depth=5,
+            max_depth=3 if len(X_train) < 100 else 5,  # 데이터 적을 땐 얕은 트리
             learning_rate=0.1,
             objective='multi:softprob' if num_classes > 2 else 'binary:logistic',
             eval_metric='mlogloss' if num_classes > 2 else 'logloss',
@@ -483,12 +543,18 @@ class ModelLearner:
             tree_method='hist'  # 빠른 학습
         )
         
-        # 학습 수행 (정규화된 데이터 사용)
-        self.model.fit(
-            X_train_final, y_train,
-            eval_set=[(X_test_final, y_test)],
-            verbose=False
-        )
+        # 학습 수행 (정규화된 데이터 + 시간 가중치 사용)
+        fit_params = {
+            'eval_set': [(X_test_final, y_test)],
+            'verbose': False
+        }
+
+        # 🆕 시간 가중치 추가
+        if weights_train is not None:
+            fit_params['sample_weight'] = weights_train
+            logger.info(f"⚖️  Using time-weighted samples (recent data prioritized)")
+
+        self.model.fit(X_train_final, y_train, **fit_params)
         
         # 평가
         y_pred = self.model.predict(X_test_final)
@@ -507,19 +573,20 @@ class ModelLearner:
         logger.info(f"✅ Initial Training Complete - Accuracy: {accuracy:.2%}")
         logger.info(f"📊 Classification Report:\n{classification_report(y_test, y_pred)}")
     
-    def retrain_model(self, X: pd.DataFrame, y: pd.Series):
+    def retrain_model(self, X: pd.DataFrame, y: pd.Series, sample_weights: np.ndarray = None):
         """
         모델 재학습 (Incremental Update)
-        
+        🆕 시간 가중치를 반영한 재학습
+
         새로운 매매 데이터를 포함하여 모델을 업데이트합니다.
         XGBoost는 기본적으로 incremental learning을 완벽 지원하지 않지만,
         전체 데이터로 재학습하는 방식으로 구현합니다.
         """
         logger.info("🔄 Retraining Model with New Data...")
-        
-        # 전체 데이터로 재학습
-        self.train_initial_model(X, y)
-        
+
+        # 전체 데이터로 재학습 (시간 가중치 포함)
+        self.train_initial_model(X, y, sample_weights)
+
         logger.info(f"✅ Retraining Complete - New Accuracy: {self.metrics['accuracy']:.2%}")
     
     def predict(self, features: pd.DataFrame) -> Tuple[int, float]:
@@ -561,7 +628,7 @@ class ModelLearner:
         features = features[expected_features]
         
         # 🛡️ NaN 처리 (PCA 오류 방지)
-        features.fillna(0, inplace=True)
+        features = features.fillna(0)
         
         # 🔧 Feature Normalization 적용 (학습 시와 동일한 Scaler 사용)
         if self.scaler is not None:

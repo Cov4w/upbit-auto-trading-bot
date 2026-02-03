@@ -4,18 +4,24 @@ Bot Control Router
 봇 시작/중지, 설정 변경, 추천 업데이트 등 제어 API
 """
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends
 from typing import Dict
 import logging
 
 from models.schemas import (
     BotStatus, SuccessResponse, StartBotRequest, StopBotRequest,
-    UpdateConfigRequest, TickerToggleRequest
+    UpdateConfigRequest, TickerToggleRequest, User
 )
 
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
+
+def get_current_user():
+    """Import auth dependency to avoid circular imports"""
+    from routers.auth import get_current_user
+    return get_current_user
 
 
 def get_bot():
@@ -44,7 +50,7 @@ async def get_bot_status():
 
 
 @router.post("/start", response_model=SuccessResponse)
-async def start_bot(request: StartBotRequest = None):
+async def start_bot(request: StartBotRequest = None, current_user: User = Depends(get_current_user)):
     """
     봇 시작
 
@@ -81,7 +87,7 @@ async def start_bot(request: StartBotRequest = None):
 
 
 @router.post("/stop", response_model=SuccessResponse)
-async def stop_bot():
+async def stop_bot(current_user: User = Depends(get_current_user)):
     """
     봇 중지
 
@@ -110,7 +116,7 @@ async def stop_bot():
 
 
 @router.post("/retrain", response_model=SuccessResponse)
-async def retrain_model():
+async def retrain_model(current_user: User = Depends(get_current_user)):
     """
     모델 강제 재학습
 
@@ -136,7 +142,7 @@ async def retrain_model():
 
 
 @router.post("/update-recommendations", response_model=SuccessResponse)
-async def update_recommendations():
+async def update_recommendations(current_user: User = Depends(get_current_user)):
     """
     코인 추천 목록 업데이트 (비동기)
 
@@ -165,7 +171,7 @@ async def update_recommendations():
 
 
 @router.post("/config", response_model=SuccessResponse)
-async def update_config(request: UpdateConfigRequest):
+async def update_config(request: UpdateConfigRequest, current_user: User = Depends(get_current_user)):
     """
     봇 설정 업데이트
 
@@ -196,11 +202,25 @@ async def update_config(request: UpdateConfigRequest):
             bot.rebuy_threshold = request.rebuy_threshold
             updated['rebuy_threshold'] = request.rebuy_threshold
 
+        if request.use_net_profit is not None:
+            bot.use_net_profit = request.use_net_profit
+            updated['use_net_profit'] = request.use_net_profit
+
+        if request.use_dynamic_target is not None:
+            bot.use_dynamic_target = request.use_dynamic_target
+            updated['use_dynamic_target'] = request.use_dynamic_target
+
+        if request.use_dynamic_sizing is not None:
+            bot.use_dynamic_sizing = request.use_dynamic_sizing
+            updated['use_dynamic_sizing'] = request.use_dynamic_sizing
+
         logger.info("=" * 60)
         logger.info("⚙️ TRADING SETTINGS UPDATED")
         for key, value in updated.items():
             if 'profit' in key or 'loss' in key or 'threshold' in key:
                 logger.info(f"   {key}: {value * 100:.1f}%")
+            elif isinstance(value, bool):
+                logger.info(f"   {key}: {'Enabled' if value else 'Disabled'}")
             else:
                 logger.info(f"   {key}: {value:,.0f} KRW")
         logger.info("=" * 60)
@@ -217,7 +237,7 @@ async def update_config(request: UpdateConfigRequest):
 
 
 @router.post("/ticker/toggle", response_model=SuccessResponse)
-async def toggle_ticker(request: TickerToggleRequest):
+async def toggle_ticker(request: TickerToggleRequest, current_user: User = Depends(get_current_user)):
     """
     티커 추가/제거 토글
 

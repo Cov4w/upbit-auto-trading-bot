@@ -28,6 +28,7 @@ from models.schemas import (
 from routers import bot as bot_router
 from routers import data as data_router
 from routers import websocket as websocket_router
+from routers import auth as auth_router
 
 
 # Setup Logging
@@ -92,6 +93,7 @@ app.add_middleware(
 
 
 # Include Routers
+app.include_router(auth_router.router, prefix="/api/auth", tags=["Authentication"])
 app.include_router(bot_router.router, prefix="/api/bot", tags=["Bot Control"])
 app.include_router(data_router.router, prefix="/api/data", tags=["Data"])
 app.include_router(websocket_router.router, prefix="/ws", tags=["WebSocket"])
