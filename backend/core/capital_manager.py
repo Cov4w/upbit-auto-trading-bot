@@ -95,7 +95,7 @@ class CapitalManager:
                 return result if result else 0.0
 
         try:
-            deposits = self.exchange.get_krw_deposits(limit=1000)
+            deposits = self.exchange.get_krw_deposits(limit=100)
             total = sum(float(d.get('amount', 0)) for d in deposits if d.get('state') == 'ACCEPTED')
             logger.info(f"💰 총 입금액 (API): {total:,.0f} 원 ({len(deposits)}건)")
             return total
@@ -117,7 +117,7 @@ class CapitalManager:
                 return result if result else 0.0
 
         try:
-            withdrawals = self.exchange.get_krw_withdrawals(limit=1000)
+            withdrawals = self.exchange.get_krw_withdrawals(limit=100)
             # Upbit에서는 수수료 제외한 실제 출금액
             total = sum(float(w.get('amount', 0)) for w in withdrawals if w.get('state') == 'DONE')
             logger.info(f"💸 총 출금액 (API): {total:,.0f} 원 ({len(withdrawals)}건)")
