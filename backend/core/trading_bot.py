@@ -118,6 +118,11 @@ class TradingBot:
 
         # 🔒 Thread Safety Locks
         self._positions_lock = threading.Lock()
+
+        # 💾 Balance & Capital Cache (거래 시에만 업데이트)
+        self._balance_cache = None
+        self._capital_cache = None
+        self._last_deposit_check = None  # 마지막 입출금 체크 시간
         self._tickers_lock = threading.Lock()
         self._recommendations_lock = threading.Lock()
         
@@ -757,9 +762,12 @@ class TradingBot:
                 "amount": buy_amount,
                 "entry_time": datetime.now()
             }
-            
+
             logger.info(f"✅ Position Opened: {ticker} (Trade ID={trade_id})")
-        
+
+            # 🔥 매수 후 잔고 캐시 갱신
+            self._refresh_balance_cache()
+
         except Exception as e:
             logger.error(f"❌ Buy execution failed: {e}")
     
@@ -1048,15 +1056,18 @@ class TradingBot:
             
             # 6. 포지션 클리어
             del self.positions[ticker]
-            
-            # 6. 🔥 학습 트리거 (N건 누적 시)
+
+            # 🔥 매도 후 잔고 캐시 갱신
+            self._refresh_balance_cache()
+
+            # 7. 🔥 학습 트리거 (N건 누적 시)
             stats = self.memory.get_statistics()
             if stats and stats.get('total_trades', 0) % self.retrain_threshold == 0 and stats.get('total_trades', 0) > 0:
                 logger.info("🎓 Triggering Model Retraining...")
                 self._retrain_model()
-            
+
             logger.info(f"✅ Position Closed: Trade ID={closed_trade_id}")
-        
+
         except Exception as e:
             logger.error(f"❌ Sell execution failed: {e}")
             import traceback
@@ -1261,20 +1272,16 @@ class TradingBot:
 
 
     
-    def get_account_balance(self) -> Dict:
-        """계좌 잔액 및 모든 보유 포지션 조회 (원금 대비 수익률 포함)"""
+    def _refresh_balance_cache(self):
+        """잔고 캐시 갱신 (거래 후 호출)"""
         try:
             # 1. KRW 잔액 (Upbit/Bithumb 공통)
-            # 임의의 티커로 호출하여 KRW 잔액 획득 (구조상 KRW는 공통)
             balance_data = self.exchange.get_balance(self.tickers[0] if self.tickers else "BTC")
-
             total_krw = balance_data.get("krw_balance", 0)
             total_value = total_krw
             holdings = []
 
             # 2. 선택된 코인들의 보유량 확인
-            # (주의: 실제 거래소 잔액을 다 조회하려면 get_balances() API가 필요하지만,
-            #  여기서는 선택된 티커들에 대해서만 루프를 돕니다)
             target_tickers = set(self.tickers) | set(self.positions.keys())
 
             for ticker in target_tickers:
@@ -1292,18 +1299,76 @@ class TradingBot:
                         "value": val
                     })
 
-            # 3. 원금 대비 수익률 계산 (입출금 기반)
-            # 입출금 내역으로 원금 계산
+            # 캐시 업데이트
+            self._balance_cache = {
+                "krw_balance": total_krw,
+                "holdings": holdings,
+                "total_value": total_value,
+                "api_ok": True,
+                "cached_at": datetime.now()
+            }
+            logger.info(f"💾 잔고 캐시 갱신: KRW {total_krw:,.0f} 원, 총 {total_value:,.0f} 원")
+        except Exception as e:
+            logger.error(f"❌ 잔고 캐시 갱신 실패: {e}")
+
+    def _refresh_capital_cache(self):
+        """원금 캐시 갱신 (입출금 감지 시 호출)"""
+        try:
             net_capital = self.capital.get_net_capital()
 
-            # 원금이 0이면 (입출금 내역이 없으면) 현재 자산을 자동 입금 처리
-            if net_capital == 0 and total_value > 0:
+            # 원금이 0이고 잔고가 있으면 자동 입금 처리
+            if net_capital == 0 and self._balance_cache and self._balance_cache.get("total_value", 0) > 0:
+                total_value = self._balance_cache["total_value"]
                 self.capital.add_deposit(total_value, "자동 감지: 초기 자본")
                 net_capital = total_value
                 logger.info(f"💰 자동 입금 기록: {total_value:,.0f} 원 (초기 자본)")
 
-            # initial_balance는 입출금 기반으로 업데이트
+            self._capital_cache = net_capital
             self.initial_balance = net_capital
+            logger.info(f"💾 원금 캐시 갱신: {net_capital:,.0f} 원")
+        except Exception as e:
+            logger.error(f"❌ 원금 캐시 갱신 실패: {e}")
+
+    def _check_deposits_withdrawals(self):
+        """입출금 감지 (5분마다 체크)"""
+        now = datetime.now()
+
+        # 5분에 한 번만 체크
+        if self._last_deposit_check and (now - self._last_deposit_check).total_seconds() < 300:
+            return
+
+        try:
+            # 이전 원금과 현재 원금 비교
+            old_capital = self._capital_cache
+            current_capital = self.capital.get_net_capital()
+
+            # 원금이 변경되었으면 입출금이 발생한 것
+            if old_capital is not None and abs(current_capital - old_capital) > 1000:  # 1000원 이상 차이
+                logger.info(f"🔔 입출금 감지: {old_capital:,.0f} → {current_capital:,.0f} 원")
+                self._refresh_capital_cache()
+
+            self._last_deposit_check = now
+        except Exception as e:
+            logger.error(f"❌ 입출금 감지 실패: {e}")
+
+    def get_account_balance(self) -> Dict:
+        """계좌 잔액 및 모든 보유 포지션 조회 (캐시 기반)"""
+        try:
+            # 🔥 입출금 감지 (5분마다)
+            self._check_deposits_withdrawals()
+
+            # 캐시가 없으면 초기화
+            if self._balance_cache is None:
+                self._refresh_balance_cache()
+
+            if self._capital_cache is None:
+                self._refresh_capital_cache()
+
+            # 캐시된 데이터 사용
+            total_value = self._balance_cache.get("total_value", 0)
+            net_capital = self._capital_cache or 0
+
+            # peak_balance 업데이트
             if self.peak_balance is None or total_value > self.peak_balance:
                 self.peak_balance = total_value
 
@@ -1312,13 +1377,10 @@ class TradingBot:
             profit_rate = (profit_amount / net_capital * 100) if net_capital > 0 else 0.0
 
             return {
-                "krw_balance": total_krw,
-                "holdings": holdings,
-                "total_value": total_value,
+                **self._balance_cache,
                 "initial_balance": net_capital,
                 "profit_amount": profit_amount,
                 "profit_rate": profit_rate,
-                "api_ok": True
             }
         except Exception as e:
             logger.warning(f"⚠️ Balance error: {e}")
