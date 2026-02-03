@@ -1,12 +1,30 @@
-streamlit
+# Web Framework (기존 Streamlit + 신규 FastAPI)
+streamlit  # Legacy UI (레거시 지원용)
+fastapi==0.109.0  # 신규 Backend API
+uvicorn[standard]==0.27.0  # ASGI 서버
+pydantic==2.5.3  # 데이터 검증
+python-multipart==0.0.6  # 폼 데이터 처리
+websockets==12.0  # WebSocket 지원
+
+# Data Processing
 pandas
 numpy
-xgboost
 scikit-learn
+xgboost
+ta  # Technical Analysis
+
+# Exchange APIs
 pyupbit
 pybithumb
+
+# Utilities
 python-dotenv
-ta
 matplotlib
 plotly
 watchdog
+
+# HTTP Client
+httpx==0.26.0
+
+# Logging
+python-json-logger==2.0.7

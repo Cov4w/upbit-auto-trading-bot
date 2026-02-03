@@ -1,0 +1,251 @@
+"""
+Bot Control Router
+==================
+봇 시작/중지, 설정 변경, 추천 업데이트 등 제어 API
+"""
+
+from fastapi import APIRouter, HTTPException
+from typing import Dict
+import logging
+
+from models.schemas import (
+    BotStatus, SuccessResponse, StartBotRequest, StopBotRequest,
+    UpdateConfigRequest, TickerToggleRequest
+)
+
+
+router = APIRouter()
+logger = logging.getLogger(__name__)
+
+
+def get_bot():
+    """봇 인스턴스 가져오기"""
+    from main import trading_bot
+    if trading_bot is None:
+        raise HTTPException(status_code=500, detail="Bot not initialized")
+    return trading_bot
+
+
+@router.get("/status", response_model=BotStatus)
+async def get_bot_status():
+    """
+    봇 현재 상태 조회
+
+    Returns:
+        BotStatus: 봇의 현재 상태 정보
+    """
+    try:
+        bot = get_bot()
+        status = bot.get_status()
+        return BotStatus(**status)
+    except Exception as e:
+        logger.error(f"Failed to get bot status: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/start", response_model=SuccessResponse)
+async def start_bot(request: StartBotRequest = None):
+    """
+    봇 시작
+
+    Args:
+        request: 선택적으로 티커 리스트 지정 가능
+
+    Returns:
+        SuccessResponse: 성공 여부
+    """
+    try:
+        bot = get_bot()
+
+        if bot.is_running:
+            return SuccessResponse(
+                success=False,
+                message="Bot is already running"
+            )
+
+        # 티커 설정 (요청에 포함된 경우)
+        if request and request.tickers:
+            bot.tickers = request.tickers
+
+        bot.start()
+
+        return SuccessResponse(
+            success=True,
+            message="Bot started successfully",
+            data={"tickers": bot.tickers}
+        )
+
+    except Exception as e:
+        logger.error(f"Failed to start bot: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/stop", response_model=SuccessResponse)
+async def stop_bot():
+    """
+    봇 중지
+
+    Returns:
+        SuccessResponse: 성공 여부
+    """
+    try:
+        bot = get_bot()
+
+        if not bot.is_running:
+            return SuccessResponse(
+                success=False,
+                message="Bot is not running"
+            )
+
+        bot.stop()
+
+        return SuccessResponse(
+            success=True,
+            message="Bot stopped successfully"
+        )
+
+    except Exception as e:
+        logger.error(f"Failed to stop bot: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/retrain", response_model=SuccessResponse)
+async def retrain_model():
+    """
+    모델 강제 재학습
+
+    Returns:
+        SuccessResponse: 성공 여부
+    """
+    try:
+        bot = get_bot()
+        bot.force_retrain()
+
+        return SuccessResponse(
+            success=True,
+            message="Model retrained successfully",
+            data={
+                "accuracy": bot.learner.metrics.get('accuracy', 0),
+                "total_samples": bot.learner.metrics.get('total_samples', 0)
+            }
+        )
+
+    except Exception as e:
+        logger.error(f"Failed to retrain model: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/update-recommendations", response_model=SuccessResponse)
+async def update_recommendations():
+    """
+    코인 추천 목록 업데이트 (비동기)
+
+    Returns:
+        SuccessResponse: 성공 여부
+    """
+    try:
+        bot = get_bot()
+
+        if bot.is_updating_recommendations:
+            return SuccessResponse(
+                success=False,
+                message="Recommendation update already in progress"
+            )
+
+        bot.update_recommendations_async()
+
+        return SuccessResponse(
+            success=True,
+            message="Recommendation update started"
+        )
+
+    except Exception as e:
+        logger.error(f"Failed to update recommendations: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/config", response_model=SuccessResponse)
+async def update_config(request: UpdateConfigRequest):
+    """
+    봇 설정 업데이트
+
+    Args:
+        request: 업데이트할 설정 (trade_amount, target_profit, stop_loss, rebuy_threshold)
+
+    Returns:
+        SuccessResponse: 성공 여부
+    """
+    try:
+        bot = get_bot()
+
+        updated = {}
+
+        if request.trade_amount is not None:
+            bot.trade_amount = request.trade_amount
+            updated['trade_amount'] = request.trade_amount
+
+        if request.target_profit is not None:
+            bot.target_profit = request.target_profit
+            updated['target_profit'] = request.target_profit
+
+        if request.stop_loss is not None:
+            bot.stop_loss = request.stop_loss
+            updated['stop_loss'] = request.stop_loss
+
+        if request.rebuy_threshold is not None:
+            bot.rebuy_threshold = request.rebuy_threshold
+            updated['rebuy_threshold'] = request.rebuy_threshold
+
+        logger.info("=" * 60)
+        logger.info("⚙️ TRADING SETTINGS UPDATED")
+        for key, value in updated.items():
+            if 'profit' in key or 'loss' in key or 'threshold' in key:
+                logger.info(f"   {key}: {value * 100:.1f}%")
+            else:
+                logger.info(f"   {key}: {value:,.0f} KRW")
+        logger.info("=" * 60)
+
+        return SuccessResponse(
+            success=True,
+            message="Configuration updated successfully",
+            data={"updated": updated}
+        )
+
+    except Exception as e:
+        logger.error(f"Failed to update config: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/ticker/toggle", response_model=SuccessResponse)
+async def toggle_ticker(request: TickerToggleRequest):
+    """
+    티커 추가/제거 토글
+
+    Args:
+        request: 토글할 티커
+
+    Returns:
+        SuccessResponse: 성공 여부
+    """
+    try:
+        bot = get_bot()
+
+        was_active = request.ticker in bot.tickers
+        bot.toggle_ticker(request.ticker)
+        is_active = request.ticker in bot.tickers
+
+        action = "added" if is_active else "removed"
+
+        return SuccessResponse(
+            success=True,
+            message=f"Ticker {request.ticker} {action}",
+            data={
+                "ticker": request.ticker,
+                "is_active": is_active,
+                "active_tickers": bot.tickers
+            }
+        )
+
+    except Exception as e:
+        logger.error(f"Failed to toggle ticker: {e}")
+        raise HTTPException(status_code=500, detail=str(e))

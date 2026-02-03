@@ -1,5 +1,6 @@
 # Environment Variables
 .env
+.env.*
 
 # Python
 __pycache__/
@@ -10,12 +11,23 @@ __pycache__/
 venv/
 env/
 ENV/
+.pytest_cache/
 
-# AI Models & Data
+# Node.js / Frontend
+node_modules/
+frontend/node_modules/
+frontend/dist/
+frontend/.plugin-react-swc/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# AI Models & Data (Keep .gitkeep if needed, but ignore large/local files)
 models/*.pkl
 models/*.json
 data/*.db
 data/*.csv
+!data/.gitkeep
 
 # IDE
 .vscode/
