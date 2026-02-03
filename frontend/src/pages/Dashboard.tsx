@@ -22,13 +22,16 @@ export default function Dashboard() {
   const [wsConnected, setWsConnected] = useState(false);
   const [currentTime, setCurrentTime] = useState(new Date());
 
-  // Queries
+  // Queries with optimized settings
   const { data: statusData } = useQuery({
     queryKey: ['botStatus'],
     queryFn: async () => {
       const res = await api.bot.getStatus();
       return res.data;
     },
+    refetchInterval: 10000, // 10초마다 자동 갱신
+    refetchOnWindowFocus: false, // 창 포커스 시 자동 refetch 비활성화
+    staleTime: 5000, // 5초간 fresh 상태 유지
   });
 
   const { data: balanceData } = useQuery({
@@ -37,6 +40,9 @@ export default function Dashboard() {
       const res = await api.data.getBalance();
       return res.data;
     },
+    refetchInterval: 15000, // 15초마다 자동 갱신
+    refetchOnWindowFocus: false,
+    staleTime: 10000,
   });
 
   const { data: positionsData } = useQuery({
@@ -45,6 +51,9 @@ export default function Dashboard() {
       const res = await api.data.getPositions();
       return res.data.data;
     },
+    refetchInterval: 10000,
+    refetchOnWindowFocus: false,
+    staleTime: 5000,
   });
 
   const { data: recommendationsData } = useQuery({
@@ -53,6 +62,9 @@ export default function Dashboard() {
       const res = await api.data.getRecommendations();
       return res.data;
     },
+    refetchInterval: 30000, // 30초마다 (추천은 덜 빈번하게)
+    refetchOnWindowFocus: false,
+    staleTime: 20000,
   });
 
   // Mutations
@@ -97,42 +109,82 @@ export default function Dashboard() {
 
   // WebSocket 연결
   useEffect(() => {
-    const ws = api.ws.connectLive();
+    let ws: WebSocket | null = null;
+    let pingInterval: NodeJS.Timeout | null = null;
+    let reconnectTimeout: NodeJS.Timeout | null = null;
+    let isUnmounting = false;
 
-    ws.onopen = () => {
-      console.log('WebSocket connected');
-      setWsConnected(true);
-    };
+    const connect = () => {
+      if (isUnmounting) return;
 
-    ws.onmessage = (event) => {
-      const message = JSON.parse(event.data);
+      try {
+        ws = api.ws.connectLive();
 
-      if (message.type === 'update') {
-        // 실시간 업데이트 반영
-        queryClient.invalidateQueries({ queryKey: ['botStatus'] });
-        queryClient.invalidateQueries({ queryKey: ['positions'] });
+        ws.onopen = () => {
+          console.log('WebSocket connected');
+          setWsConnected(true);
+        };
+
+        ws.onmessage = (event) => {
+          try {
+            const message = JSON.parse(event.data);
+
+            if (message.type === 'update') {
+              // 실시간 업데이트 반영 (throttled)
+              queryClient.invalidateQueries({
+                queryKey: ['botStatus'],
+                refetchType: 'none' // 자동 refetch 방지
+              });
+              queryClient.invalidateQueries({
+                queryKey: ['positions'],
+                refetchType: 'none'
+              });
+            }
+          } catch (e) {
+            console.error('WebSocket message parse error:', e);
+          }
+        };
+
+        ws.onclose = () => {
+          console.log('WebSocket disconnected');
+          setWsConnected(false);
+
+          // 재연결 시도 (5초 후, unmount되지 않은 경우만)
+          if (!isUnmounting) {
+            reconnectTimeout = setTimeout(() => {
+              console.log('Attempting to reconnect...');
+              connect();
+            }, 5000);
+          }
+        };
+
+        ws.onerror = (error) => {
+          console.error('WebSocket error:', error);
+          ws?.close();
+        };
+
+        // Ping 전송 (keep-alive)
+        pingInterval = setInterval(() => {
+          if (ws && ws.readyState === WebSocket.OPEN) {
+            ws.send('ping');
+          }
+        }, 30000);
+      } catch (error) {
+        console.error('WebSocket connection error:', error);
+        setWsConnected(false);
       }
     };
 
-    ws.onclose = () => {
-      console.log('WebSocket disconnected');
-      setWsConnected(false);
-    };
-
-    ws.onerror = (error) => {
-      console.error('WebSocket error:', error);
-    };
-
-    // Ping 전송 (keep-alive)
-    const pingInterval = setInterval(() => {
-      if (ws.readyState === WebSocket.OPEN) {
-        ws.send('ping');
-      }
-    }, 30000);
+    connect();
 
     return () => {
-      clearInterval(pingInterval);
-      ws.close();
+      isUnmounting = true;
+      if (pingInterval) clearInterval(pingInterval);
+      if (reconnectTimeout) clearTimeout(reconnectTimeout);
+      if (ws) {
+        ws.close();
+        ws = null;
+      }
     };
   }, [queryClient]);
 
