@@ -170,7 +170,11 @@ class Backtester:
                         'confidence': confidence
                     }
 
-                    logger.info(f"[매수] {current_date.strftime('%Y-%m-%d')} | {current_price:,.0f}원 | 확신도: {confidence:.2%}")
+                    # 🔥 중요: 매수 시 자본 감소
+                    self.capital -= trade_amount
+                    self.capital_history.append(self.capital)
+
+                    logger.info(f"[매수] {current_date.strftime('%Y-%m-%d')} | {current_price:,.0f}원 | 확신도: {confidence:.2%} | 잔액: {self.capital:,.0f}원")
 
             # 매도 조건: 포지션 있음 AND (익절 OR 손절)
             elif self.position is not None:
@@ -195,7 +199,8 @@ class Backtester:
                     exit_amount = self.position['amount'] * current_price
                     profit = exit_amount - self.position['trade_amount']
 
-                    self.capital += profit
+                    # 🔥 중요: 매도 시 전체 금액 회수 (원금 + 수익/손실)
+                    self.capital += exit_amount
                     self.capital_history.append(self.capital)
 
                     # 거래 기록
@@ -207,10 +212,11 @@ class Backtester:
                         'profit_rate': profit_rate,
                         'profit': profit,
                         'confidence': self.position['confidence'],
-                        'reason': sell_reason
+                        'reason': sell_reason,
+                        'ticker': ticker  # 🆕 어떤 코인인지 기록
                     })
 
-                    logger.info(f"[매도] {current_date.strftime('%Y-%m-%d')} | {current_price:,.0f}원 | 수익률: {profit_rate*100:+.2f}% | {sell_reason}")
+                    logger.info(f"[매도] {current_date.strftime('%Y-%m-%d')} | {current_price:,.0f}원 | 수익률: {profit_rate*100:+.2f}% | {sell_reason} | 잔액: {self.capital:,.0f}원")
 
                     self.position = None
 
