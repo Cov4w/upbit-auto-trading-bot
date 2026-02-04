@@ -385,11 +385,12 @@ class TradingBot:
                     "amount": amount,
                     "entry_time": entry_time  # 🔥 DB에서 복구된 시간!
                 }
-                
-                # 감시 목록(Tickers)에 자동 추가
-                if ticker not in self.tickers:
-                    self.tickers.append(ticker)
-                    logger.info(f"➕ Auto-added to watch list: {ticker}")
+
+                # 감시 목록(Tickers)에 자동 추가 (포지션 보호를 위해)
+                with self._tickers_lock:  # 🔒 Thread-safe
+                    if ticker not in self.tickers:
+                        self.tickers.append(ticker)
+                        logger.info(f"➕ Auto-added to watch list: {ticker}")
             
             logger.info(f"✅ Position Recovery Complete. Managing {len(self.positions)} positions.")
             
@@ -419,6 +420,9 @@ class TradingBot:
                     with self._tickers_lock:  # 🔒 Thread-safe
                         if ticker in self.tickers:
                             self.tickers.remove(ticker)
+                        # 출처 범위 정보도 삭제
+                        if ticker in self.ticker_origin_range:
+                            del self.ticker_origin_range[ticker]
         
         except Exception as e:
             logger.error(f"❌ Position sync failed: {e}")
@@ -433,7 +437,9 @@ class TradingBot:
         
         try:
             # 과거 30일 데이터 수집 (Primary Ticker 기준)
-            df = self.exchange.get_ohlcv(self.tickers[0], interval="day")
+            with self._tickers_lock:  # 🔒 Thread-safe read
+                primary_ticker = self.tickers[0] if self.tickers else "BTC"
+            df = self.exchange.get_ohlcv(primary_ticker, interval="day")
             
             if df is None or len(df) < 30:
                 logger.warning("⚠️ Insufficient historical data. Using demo mode.")
@@ -624,10 +630,10 @@ class TradingBot:
                 
                 # 쿨다운 해제
                 del self.sold_coins_cooldown[ticker]
-                # 티커 리스트에 재추가
-                with self._tickers_lock:  # 🔒 Thread-safe
-                    if ticker not in self.tickers:
-                        self.tickers.append(ticker)
+
+                # ⚠️ 쿨다운 해제 후에는 다음 추천 업데이트 때 다시 추가되도록 함
+                # 출처 범위를 알 수 없으므로 수동으로 추가하지 않음
+                # (다음 스캔 때 Top 5에 들면 자동으로 추가됨)
             
             # 🆕 다양화된 매수 조건 (3가지 시나리오) + 추세 필터
             # 시나리오 1: AI가 좋은 수익 예측 + 과매도 + 추세 필터
@@ -1068,6 +1074,9 @@ class TradingBot:
                 if ticker in self.tickers:
                     self.tickers.remove(ticker)
                     logger.info(f"➖ [{ticker}] Removed from active tickers")
+                # 출처 범위 정보도 삭제 (메모리 누수 방지)
+                if ticker in self.ticker_origin_range:
+                    del self.ticker_origin_range[ticker]
             
             # 6. 포지션 클리어
             del self.positions[ticker]
@@ -1337,17 +1346,25 @@ class TradingBot:
         logger.info("🔄 Auto recommendation timer stopped")
     
     def toggle_ticker(self, ticker: str):
-        """티커 활성화/비활성화 토글"""
+        """
+        티커 활성화/비활성화 토글 (수동 추가/제거)
+        ⚠️ 수동으로 추가된 티커는 출처 범위가 없으므로 동적 제거 대상이 아님
+        """
         with self._tickers_lock:  # 🔒 Thread-safe
             if ticker in self.tickers:
                 if len(self.tickers) > 1: # 최소 1개 유지를 원한다면
                     self.tickers.remove(ticker)
+                    # 출처 범위 정보도 삭제 (있는 경우만)
+                    if ticker in self.ticker_origin_range:
+                        del self.ticker_origin_range[ticker]
                     logger.info(f"➖ Ticker Removed: {ticker}")
                 else:
                     logger.warning("⚠️ Cannot remove last ticker")
             else:
                 self.tickers.append(ticker)
-                logger.info(f"➕ Ticker Added: {ticker}")
+                # 수동 추가된 티커는 출처 범위를 기록하지 않음
+                # (동적 제거 대상이 아니므로 계속 유지됨)
+                logger.info(f"➕ Ticker Added (Manual): {ticker}")
     
     def get_status(self) -> Dict:
         """
@@ -1355,9 +1372,12 @@ class TradingBot:
         """
         stats = self.memory.get_statistics()
 
+        with self._tickers_lock:  # 🔒 Thread-safe read
+            tickers_snapshot = self.tickers[:]
+
         return {
             "is_running": self.is_running,
-            "tickers": self.tickers,
+            "tickers": tickers_snapshot,
             "use_ai_selection": self.use_ai_selection,
             "recommended_coins": self.recommended_coins,
             "positions": self.positions,
@@ -1386,13 +1406,16 @@ class TradingBot:
         """잔고 캐시 갱신 (거래 후 호출)"""
         try:
             # 1. KRW 잔액 (Upbit/Bithumb 공통)
-            balance_data = self.exchange.get_balance(self.tickers[0] if self.tickers else "BTC")
+            with self._tickers_lock:  # 🔒 Thread-safe read
+                first_ticker = self.tickers[0] if self.tickers else "BTC"
+            balance_data = self.exchange.get_balance(first_ticker)
             total_krw = balance_data.get("krw_balance", 0)
             total_value = total_krw
             holdings = []
 
             # 2. 선택된 코인들의 보유량 확인
-            target_tickers = set(self.tickers) | set(self.positions.keys())
+            with self._tickers_lock:  # 🔒 Thread-safe read
+                target_tickers = set(self.tickers) | set(self.positions.keys())
 
             for ticker in target_tickers:
                 b_data = self.exchange.get_balance(ticker)
