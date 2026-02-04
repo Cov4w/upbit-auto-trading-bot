@@ -122,6 +122,7 @@ class TradingBot:
 
         # 🔒 Thread Safety Locks
         self._positions_lock = threading.Lock()
+        self._tickers_lock = threading.Lock()  # 티커 리스트 동시 접근 보호
 
         # 💾 Balance & Capital Cache (거래 시에만 업데이트)
         self._balance_cache = None
@@ -314,7 +315,11 @@ class TradingBot:
                 if available_krw < self.trade_amount:
                     logger.debug(f"💸 Insufficient balance ({available_krw:,.0f} KRW). Skipping all buy checks.")
                 else:
-                    for ticker in self.tickers:
+                    # 🔒 Thread-safe: 티커 리스트 복사본 생성
+                    with self._tickers_lock:
+                        tickers_snapshot = self.tickers[:]
+
+                    for ticker in tickers_snapshot:
                         # 이미 포지션이 있는 코인은 건너뜀
                         if ticker not in self.positions:
                             self._check_entry_conditions(ticker)
@@ -411,8 +416,9 @@ class TradingBot:
                 for ticker in removed_tickers:
                     logger.info(f"🗑️ Position removed: {ticker} (Sold manually or insufficient balance)")
                     # Active Tickers에서도 제거
-                    if ticker in self.tickers:
-                        self.tickers.remove(ticker)
+                    with self._tickers_lock:  # 🔒 Thread-safe
+                        if ticker in self.tickers:
+                            self.tickers.remove(ticker)
         
         except Exception as e:
             logger.error(f"❌ Position sync failed: {e}")
@@ -619,8 +625,9 @@ class TradingBot:
                 # 쿨다운 해제
                 del self.sold_coins_cooldown[ticker]
                 # 티커 리스트에 재추가
-                if ticker not in self.tickers:
-                    self.tickers.append(ticker)
+                with self._tickers_lock:  # 🔒 Thread-safe
+                    if ticker not in self.tickers:
+                        self.tickers.append(ticker)
             
             # 🆕 다양화된 매수 조건 (3가지 시나리오) + 추세 필터
             # 시나리오 1: AI가 좋은 수익 예측 + 과매도 + 추세 필터
@@ -1057,9 +1064,10 @@ class TradingBot:
                 )
             
             # 티커 리스트에서 제거
-            if ticker in self.tickers:
-                self.tickers.remove(ticker)
-                logger.info(f"➖ [{ticker}] Removed from active tickers")
+            with self._tickers_lock:  # 🔒 Thread-safe
+                if ticker in self.tickers:
+                    self.tickers.remove(ticker)
+                    logger.info(f"➖ [{ticker}] Removed from active tickers")
             
             # 6. 포지션 클리어
             del self.positions[ticker]
@@ -1250,50 +1258,51 @@ class TradingBot:
         if not top_5_recommendations:
             return
 
-        top_5_tickers = {rec['ticker'] for rec in top_5_recommendations}
+        with self._tickers_lock:  # 🔒 Thread-safe ticker list modification
+            top_5_tickers = {rec['ticker'] for rec in top_5_recommendations}
 
-        logger.info("🔄 Dynamic Ticker Management (Grace Period: 2 cycles)")
+            logger.info("🔄 Dynamic Ticker Management (Grace Period: 2 cycles)")
 
-        # 1️⃣ Top 5 진입 → 자동 추가 & 부재 카운트 리셋
-        for rec in top_5_recommendations:
-            ticker = rec['ticker']
+            # 1️⃣ Top 5 진입 → 자동 추가 & 부재 카운트 리셋
+            for rec in top_5_recommendations:
+                ticker = rec['ticker']
 
-            # 부재 카운트 리셋
-            if ticker in self.ticker_absence_count:
+                # 부재 카운트 리셋
+                if ticker in self.ticker_absence_count:
+                    del self.ticker_absence_count[ticker]
+
+                # 티커 리스트에 추가 (중복 체크)
+                if ticker not in self.tickers:
+                    self.tickers.append(ticker)
+                    logger.info(f"   ✅ [{ticker}] Added to watch list (Top 5 entry)")
+
+            # 2️⃣ 기존 티커 중 Top 5에서 빠진 것 체크
+            tickers_to_remove = []
+
+            for ticker in self.tickers[:]:  # 복사본으로 순회
+                if ticker not in top_5_tickers:
+                    # Top 5에 없음 → 부재 카운트 증가
+                    self.ticker_absence_count[ticker] = self.ticker_absence_count.get(ticker, 0) + 1
+                    absence_count = self.ticker_absence_count[ticker]
+
+                    logger.info(f"   ⚠️ [{ticker}] Not in Top 5 (Absence: {absence_count}/2)")
+
+                    # 2회 연속 이탈 → 제거 후보
+                    if absence_count >= 2:
+                        # 포지션 체크: 보유 중이면 제거 안 함
+                        if ticker in self.positions:
+                            logger.info(f"   🔒 [{ticker}] Has active position - keeping in watch list")
+                        else:
+                            tickers_to_remove.append(ticker)
+
+            # 3️⃣ 제거 실행
+            for ticker in tickers_to_remove:
+                self.tickers.remove(ticker)
                 del self.ticker_absence_count[ticker]
+                logger.info(f"   ❌ [{ticker}] Removed from watch list (2 consecutive absences)")
 
-            # 티커 리스트에 추가 (중복 체크)
-            if ticker not in self.tickers:
-                self.tickers.append(ticker)
-                logger.info(f"   ✅ [{ticker}] Added to watch list (Top 5 entry)")
-
-        # 2️⃣ 기존 티커 중 Top 5에서 빠진 것 체크
-        tickers_to_remove = []
-
-        for ticker in self.tickers[:]:  # 복사본으로 순회
-            if ticker not in top_5_tickers:
-                # Top 5에 없음 → 부재 카운트 증가
-                self.ticker_absence_count[ticker] = self.ticker_absence_count.get(ticker, 0) + 1
-                absence_count = self.ticker_absence_count[ticker]
-
-                logger.info(f"   ⚠️ [{ticker}] Not in Top 5 (Absence: {absence_count}/2)")
-
-                # 2회 연속 이탈 → 제거 후보
-                if absence_count >= 2:
-                    # 포지션 체크: 보유 중이면 제거 안 함
-                    if ticker in self.positions:
-                        logger.info(f"   🔒 [{ticker}] Has active position - keeping in watch list")
-                    else:
-                        tickers_to_remove.append(ticker)
-
-        # 3️⃣ 제거 실행
-        for ticker in tickers_to_remove:
-            self.tickers.remove(ticker)
-            del self.ticker_absence_count[ticker]
-            logger.info(f"   ❌ [{ticker}] Removed from watch list (2 consecutive absences)")
-
-        # 결과 요약
-        logger.info(f"📊 Watch List Status: {len(self.tickers)} tickers {self.tickers}")
+            # 결과 요약
+            logger.info(f"📊 Watch List Status: {len(self.tickers)} tickers {self.tickers}")
 
     def _auto_recommendation_timer(self):
         """
@@ -1326,15 +1335,16 @@ class TradingBot:
     
     def toggle_ticker(self, ticker: str):
         """티커 활성화/비활성화 토글"""
-        if ticker in self.tickers:
-            if len(self.tickers) > 1: # 최소 1개 유지를 원한다면
-                self.tickers.remove(ticker)
-                logger.info(f"➖ Ticker Removed: {ticker}")
+        with self._tickers_lock:  # 🔒 Thread-safe
+            if ticker in self.tickers:
+                if len(self.tickers) > 1: # 최소 1개 유지를 원한다면
+                    self.tickers.remove(ticker)
+                    logger.info(f"➖ Ticker Removed: {ticker}")
+                else:
+                    logger.warning("⚠️ Cannot remove last ticker")
             else:
-                logger.warning("⚠️ Cannot remove last ticker")
-        else:
-            self.tickers.append(ticker)
-            logger.info(f"➕ Ticker Added: {ticker}")
+                self.tickers.append(ticker)
+                logger.info(f"➕ Ticker Added: {ticker}")
     
     def get_status(self) -> Dict:
         """
