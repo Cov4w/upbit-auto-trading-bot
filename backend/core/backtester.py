@@ -132,8 +132,6 @@ class Backtester:
         logger.info(f"   💰 Current Capital: {self.capital:,.0f} KRW")
         logger.info(f"   📅 Period: {df.index[0].strftime('%Y-%m-%d')} ~ {df.index[-1].strftime('%Y-%m-%d')}")
 
-        feature_engineer = FeatureEngineer()
-
         for i in range(len(df)):
             current_date = df.index[i]
             current_price = df.iloc[i]['close']
@@ -144,15 +142,20 @@ class Backtester:
 
             # 특징 추출
             try:
-                features = feature_engineer.extract_features(df.iloc[:i+1], ticker)
+                features = FeatureEngineer.extract_features(df.iloc[:i+1])
                 if features is None:
                     continue
+                features_df = FeatureEngineer.features_to_dataframe(features)
             except Exception as e:
                 logger.debug(f"Feature extraction failed at {current_date}: {e}")
                 continue
 
             # AI 예측
-            prediction, confidence = self.bot.learner.predict(features)
+            prediction, confidence = self.bot.learner.predict(features_df)
+
+            # 디버그: 예측 결과 샘플링 (10일마다)
+            if i % 10 == 0:
+                logger.debug(f"{current_date.strftime('%Y-%m-%d')} | Prediction: {prediction}, Confidence: {confidence:.2%}, Threshold: {self.bot.confidence_threshold:.2%}")
 
             # 매수 조건: prediction=2 (좋은수익) AND confidence > 임계값 AND 포지션 없음
             if prediction == 2 and confidence >= self.bot.confidence_threshold and self.position is None:
