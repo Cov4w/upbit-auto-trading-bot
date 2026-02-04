@@ -1118,25 +1118,26 @@ class TradingBot:
         logger.info("🔄 Manual Retraining Triggered")
         self._retrain_model()
 
-    def run_backtest(self, ticker: str = None, days: int = 200, async_mode: bool = True) -> Dict:
+    def run_backtest(self, tickers: list = None, days: int = 200, async_mode: bool = True) -> Dict:
         """
-        백테스팅 실행
+        백테스팅 실행 (멀티 코인 지원)
 
         Args:
-            ticker: 백테스팅할 코인 (None이면 현재 주요 ticker 사용)
+            tickers: 백테스팅할 코인 리스트 (None이면 실제 거래 내역에서 자동 선택)
             days: 테스트할 기간 (일)
             async_mode: True면 백그라운드 실행, False면 동기 실행
 
         Returns:
             백테스팅 상태 또는 결과
         """
-        if ticker is None:
-            ticker = self.tickers[0] if self.tickers else "BTC"
+        logger.info(f"🎯 Starting multi-coin backtest ({days} days, async={async_mode})")
 
-        logger.info(f"🎯 Starting backtest for {ticker} ({days} days, async={async_mode})")
+        # 새 백테스터 인스턴스 생성 (멀티 코인)
+        self.backtester = Backtester(self, tickers=tickers, days=days)
 
-        # 새 백테스터 인스턴스 생성
-        self.backtester = Backtester(self, ticker, days)
+        coin_list = ', '.join(self.backtester.tickers[:5])
+        if len(self.backtester.tickers) > 5:
+            coin_list += f" 외 {len(self.backtester.tickers) - 5}개"
 
         if async_mode:
             # 백그라운드 실행
@@ -1144,8 +1145,8 @@ class TradingBot:
             if success:
                 return {
                     'status': 'started',
-                    'message': f'백테스팅이 백그라운드에서 시작되었습니다 ({ticker}, {days}일)',
-                    'ticker': ticker,
+                    'message': f'백테스팅이 백그라운드에서 시작되었습니다 ({coin_list}, {days}일)',
+                    'tickers': self.backtester.tickers,
                     'days': days
                 }
             else:

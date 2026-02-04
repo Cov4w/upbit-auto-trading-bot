@@ -31,15 +31,15 @@ class Backtester:
     결과가 좋으면 자동으로 모델을 재학습시킵니다.
     """
 
-    def __init__(self, trading_bot, ticker: str = "BTC", days: int = 200):
+    def __init__(self, trading_bot, tickers: List[str] = None, days: int = 200):
         """
         Args:
             trading_bot: TradingBot 인스턴스
-            ticker: 백테스팅할 코인
+            tickers: 백테스팅할 코인 리스트 (None이면 실제 거래 내역에서 자동 선택)
             days: 테스트할 기간 (일)
         """
         self.bot = trading_bot
-        self.ticker = ticker
+        self.tickers = tickers or self._get_traded_coins()
         self.days = days
 
         # 시뮬레이션 상태
@@ -55,6 +55,37 @@ class Backtester:
         self.progress = 0
         self.status = "idle"  # idle, running, completed, failed
         self.results = None
+        self.current_ticker = None  # 현재 처리 중인 코인
+
+    def _get_traded_coins(self) -> List[str]:
+        """
+        실제 거래 내역에서 코인 목록 가져오기 (거래량 상위 10개)
+        """
+        import sqlite3
+
+        try:
+            with sqlite3.connect(self.bot.memory.db_path) as conn:
+                cursor = conn.execute("""
+                    SELECT ticker, COUNT(*) as count
+                    FROM trades
+                    WHERE status = 'closed'
+                    GROUP BY ticker
+                    ORDER BY count DESC
+                    LIMIT 10
+                """)
+                tickers = [row[0] for row in cursor.fetchall()]
+
+            if not tickers:
+                # 거래 내역이 없으면 기본 코인
+                logger.warning("⚠️ No trade history found, using default coins")
+                return ["BTC", "ETH", "XRP"]
+
+            logger.info(f"📊 Selected {len(tickers)} coins from trade history: {', '.join(tickers)}")
+            return tickers
+
+        except Exception as e:
+            logger.error(f"❌ Failed to get traded coins: {e}")
+            return ["BTC", "ETH", "XRP"]
 
     def fetch_historical_data(self, ticker: str, days: int = 200) -> Optional[pd.DataFrame]:
         """
@@ -84,19 +115,22 @@ class Backtester:
             logger.error(f"❌ Failed to fetch historical data: {e}")
             return None
 
-    def simulate_trade(self, df: pd.DataFrame):
+    def simulate_trade(self, df: pd.DataFrame, ticker: str = None):
         """
         과거 데이터로 매매 시뮬레이션
 
         Args:
             df: OHLCV 데이터프레임
+            ticker: 현재 백테스팅 중인 코인 (None이면 self.current_ticker 사용)
         """
         from .data_manager import FeatureEngineer
 
-        logger.info("🎮 Starting backtesting simulation...")
-        logger.info(f"   Initial Capital: {self.initial_capital:,.0f} KRW")
-        logger.info(f"   Period: {df.index[0]} ~ {df.index[-1]}")
-        logger.info("=" * 60)
+        # 현재 코인 티커
+        if ticker is None:
+            ticker = self.current_ticker or (self.tickers[0] if self.tickers else "BTC")
+
+        logger.info(f"   💰 Current Capital: {self.capital:,.0f} KRW")
+        logger.info(f"   📅 Period: {df.index[0].strftime('%Y-%m-%d')} ~ {df.index[-1].strftime('%Y-%m-%d')}")
 
         feature_engineer = FeatureEngineer()
 
@@ -104,16 +138,13 @@ class Backtester:
             current_date = df.index[i]
             current_price = df.iloc[i]['close']
 
-            # 진행률 업데이트
-            self.progress = int((i + 1) / len(df) * 100)
-
             # 최소 데이터 필요 (기술적 지표 계산)
             if i < 30:
                 continue
 
             # 특징 추출
             try:
-                features = feature_engineer.extract_features(df.iloc[:i+1], self.ticker)
+                features = feature_engineer.extract_features(df.iloc[:i+1], ticker)
                 if features is None:
                     continue
             except Exception as e:
@@ -279,28 +310,43 @@ class Backtester:
             return False
 
     def run(self):
-        """백테스팅 실행 (동기)"""
+        """백테스팅 실행 (동기) - 멀티 코인 지원"""
         try:
             self.status = "running"
             self.progress = 0
 
-            # 1. 데이터 수집
-            logger.info("🔍 Step 1: Fetching historical data...")
-            df = self.fetch_historical_data(self.ticker, self.days)
+            logger.info("=" * 60)
+            logger.info(f"🚀 Starting Multi-Coin Backtesting")
+            logger.info(f"   Coins: {', '.join(self.tickers)} ({len(self.tickers)}개)")
+            logger.info(f"   Period: {self.days} days")
+            logger.info("=" * 60)
 
-            if df is None:
-                self.status = "failed"
-                logger.error("❌ Backtesting failed: No data")
-                return None
+            # 각 코인마다 백테스팅 실행
+            for idx, ticker in enumerate(self.tickers):
+                self.current_ticker = ticker
+                logger.info(f"\n[{idx+1}/{len(self.tickers)}] Testing {ticker}...")
 
-            # 2. 시뮬레이션
-            logger.info("🎮 Step 2: Running simulation...")
-            self.simulate_trade(df)
+                # 1. 데이터 수집
+                df = self.fetch_historical_data(ticker, self.days)
 
-            # 3. 결과 분석
-            logger.info("📊 Step 3: Analyzing results...")
+                if df is None:
+                    logger.warning(f"   ⚠️ Skipping {ticker}: No data available")
+                    continue
+
+                # 2. 시뮬레이션 (이 코인에 대해)
+                self.simulate_trade(df, ticker)
+
+                # 진행률 업데이트
+                self.progress = int((idx + 1) / len(self.tickers) * 100)
+
+            # 3. 전체 결과 분석
+            logger.info("\n📊 Analyzing Overall Results...")
             results = self.analyze_results()
             self.results = results
+
+            # 코인별 통계 추가
+            results['tested_coins'] = self.tickers
+            results['coin_count'] = len(self.tickers)
 
             # 4. 결과 출력
             is_good = self.print_results(results)

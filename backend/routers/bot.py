@@ -143,25 +143,27 @@ async def retrain_model(current_user: User = Depends(get_current_user)):
 
 @router.post("/backtest/run", response_model=SuccessResponse)
 async def run_backtest(
-    ticker: str = None,
     days: int = 200,
     async_mode: bool = True,
     current_user: User = Depends(get_current_user)
 ):
     """
-    백테스팅 실행
+    백테스팅 실행 (멀티 코인)
 
     Args:
-        ticker: 백테스팅할 코인 (None이면 현재 주요 코인 사용)
         days: 테스트 기간 (일, 최대 200일)
         async_mode: 백그라운드 실행 여부
 
     Returns:
         SuccessResponse: 백테스팅 시작/완료 결과
+
+    Note:
+        실제 거래 내역에서 상위 10개 코인을 자동으로 선택하여 백테스팅합니다.
     """
     try:
         bot = get_bot()
-        result = bot.run_backtest(ticker=ticker, days=min(days, 200), async_mode=async_mode)
+        # tickers=None이면 자동으로 거래 내역에서 선택
+        result = bot.run_backtest(tickers=None, days=min(days, 200), async_mode=async_mode)
 
         return SuccessResponse(
             success=True,
