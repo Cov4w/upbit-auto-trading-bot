@@ -22,8 +22,8 @@
 ### Windows 사용자
 ```bash
 # 1. Repository 클론
-git clone https://github.com/Cov4w/auto-trading-bot.git
-cd auto-trading-bot
+git clone https://github.com/Cov4w/upbit-auto-trading-bot.git
+cd upbit-auto-trading-bot
 
 # 2. 자동 설치 (Python, Node.js 필요)
 setup.bat
@@ -40,8 +40,8 @@ start_dev.bat
 ### macOS/Linux 사용자
 ```bash
 # 1. Repository 클론
-git clone https://github.com/Cov4w/auto-trading-bot.git
-cd auto-trading-bot
+git clone https://github.com/Cov4w/upbit-auto-trading-bot.git
+cd upbit-auto-trading-bot
 
 # 2. 실행 권한 부여
 chmod +x setup.sh start_dev.sh
@@ -182,8 +182,8 @@ nano backend/.env
 
 #### 1. Repository 클론
 ```bash
-git clone https://github.com/Cov4w/auto-trading-bot.git
-cd auto-trading-bot
+git clone https://github.com/Cov4w/upbit-auto-trading-bot.git
+cd upbit-auto-trading-bot
 ```
 
 #### 2. 자동 설치
@@ -221,8 +221,8 @@ start_dev.bat
 
 #### 1. Repository 클론
 ```bash
-git clone https://github.com/Cov4w/auto-trading-bot.git
-cd auto-trading-bot
+git clone https://github.com/Cov4w/upbit-auto-trading-bot.git
+cd upbit-auto-trading-bot
 ```
 
 #### 2. 실행 권한 부여
@@ -635,7 +635,7 @@ MIT License - 자유롭게 사용, 수정, 배포 가능
 
 ### Issues
 프로젝트에 대한 질문이나 버그 리포트:
-- GitHub Issues: https://github.com/Cov4w/auto-trading-bot/issues
+- GitHub Issues: https://github.com/Cov4w/upbit-auto-trading-bot/issues
 
 ### Pull Requests
 기여는 언제나 환영합니다!

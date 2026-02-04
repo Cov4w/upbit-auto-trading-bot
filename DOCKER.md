@@ -340,7 +340,7 @@ docker-compose -f docker-compose.yml -f docker-compose.prod.yml up -d
 
 문제가 발생하면:
 1. 로그 확인: `docker-compose logs -f`
-2. GitHub Issues: https://github.com/Cov4w/auto-trading-bot/issues
+2. GitHub Issues: https://github.com/Cov4w/upbit-auto-trading-bot/issues
 3. 헬스체크 확인: `docker ps`
 
 ## 📚 참고 자료
