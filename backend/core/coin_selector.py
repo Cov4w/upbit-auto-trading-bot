@@ -18,7 +18,7 @@ import logging
 import time
 from datetime import datetime
 
-from .data_manager import FeatureEngineer, ModelLearner, TradeMemory
+from .data_manager import FeatureEngineer, ModelLearner, TradeMemory, sanitize_dict_for_json
 
 logger = logging.getLogger(__name__)
 
@@ -147,7 +147,7 @@ class CoinSelector:
                 logger.debug(f"⚠️ {ticker}: Price too low ({current_price} KRW < {MIN_PRICE}), skipping")
                 return None
             
-            return {
+            result = {
                 "ticker": ticker,
                 "confidence": confidence,
                 "prediction": prediction,
@@ -157,7 +157,10 @@ class CoinSelector:
                 "current_price": current_price,
                 "timestamp": datetime.now()
             }
-        
+
+            # JSON 직렬화를 위해 nan/inf 값 정제
+            return sanitize_dict_for_json(result)
+
         except Exception as e:
             logger.error(f"❌ Failed to analyze {ticker}: {e}")
             return None
@@ -251,34 +254,43 @@ class CoinSelector:
             logger.debug(f"No historical data for {ticker}")
             return 10.0
     
-    def _should_recommend(self, features: Dict, confidence: float, 
+    def _should_recommend(self, features: Dict, confidence: float,
                          prediction: int, score: float) -> bool:
         """
         매수 추천 여부 판단
-        
+
         Criteria:
-        - AI 상승 예측 (prediction == 1)
+        - AI "좋은 수익" 예측 (prediction == 2) 또는 높은 확신도
         - 확신도 > 0.6
         - 종합 점수 > 60
-        - (RSI < 40 OR BB 하단 30% 이내)
+        - (RSI < 40 OR BB 하단 30% 이내) OR (MACD 골든크로스 - 모멘텀)
         """
-        if prediction != 1:
+        # 🔧 prediction 체크 수정: 2(좋은수익) 또는 confidence 기반
+        # prediction: 0(큰손실), 1(소폭), 2(좋은수익)
+        if prediction == 0:  # 큰손실 예측 시 매수 안함
             return False
-        
+
         if confidence < 0.6:
             return False
-        
+
         if score < 60:
             return False
-        
-        # Mean Reversion 조건
+
+        # 1. Mean Reversion 조건 (과매도)
         rsi = features.get('rsi', 50)
         bb_position = features.get('bb_position', 0.5)
-        
-        if rsi > 40 and bb_position > 0.3:
-            return False  # 과매도 아님
-        
-        return True
+
+        if rsi < 40 or bb_position < 0.3:
+            return True  # 과매도 → 매수
+
+        # 2. 🔥 모멘텀 전략 (상승 추세)
+        macd = features.get('macd', 0)
+        macd_signal = features.get('macd_signal', 0)
+
+        if macd > macd_signal:  # MACD 골든크로스 → 상승 추세
+            return True
+
+        return False
     
     def get_top_recommendations(self, top_n: int = 5) -> List[Dict]:
         """

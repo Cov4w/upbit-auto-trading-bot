@@ -5,10 +5,16 @@ Backtesting Engine
 
 Features:
 - 업비트 API 기반 과거 데이터 수집
-- AI 모델 기반 매매 시뮬레이션
+- AI 모델 기반 매매 시뮬레이션 (실제 트레이딩 로직과 동일)
 - 성과 지표 계산 (승률, 손익비, MDD, Sharpe Ratio)
 - 백그라운드 실행 지원
 - 완료 시 자동 모델 재학습
+
+🔧 v2.1 Updates:
+- 매수/매도 조건 단순화 (과적합 방지)
+- 진입: Mean Reversion OR MACD Momentum
+- 청산: Target Profit / Stop Loss / BB Upper
+- 수수료 반영, 멀티코인 포지션 분리
 """
 
 import pandas as pd
@@ -29,6 +35,8 @@ class Backtester:
 
     과거 데이터로 현재 AI 전략의 성과를 시뮬레이션하고,
     결과가 좋으면 자동으로 모델을 재학습시킵니다.
+
+    🔧 실제 트레이딩 로직과 완전히 동일한 조건 사용
     """
 
     def __init__(self, trading_bot, tickers: List[str] = None, days: int = 200):
@@ -45,9 +53,21 @@ class Backtester:
         # 시뮬레이션 상태
         self.initial_capital = 1_000_000
         self.capital = self.initial_capital
-        self.position = None
+        self.positions: Dict[str, Dict] = {}  # 🔧 멀티코인 포지션 지원
         self.trades = []
         self.capital_history = [self.initial_capital]
+
+        # 🔧 수수료 설정 (실제와 동일)
+        self.fee_rate = 0.0005  # 0.05% 편도
+
+        # 🔧 일봉 백테스팅용 설정 (단순화)
+        self.backtest_target_profit = 0.03  # 3% (일봉용)
+        self.backtest_stop_loss = 0.03      # 3% (일봉용, 완화)
+
+        # 🔧 BTC 필터 (하락장 매수 금지)
+        self.btc_filter_enabled = True
+        self.btc_decline_threshold = -0.03  # BTC 3% 하락 시 매수 금지
+        self.btc_data = None  # BTC 데이터 캐시
 
         # 백테스팅 상태
         self.is_running = False
@@ -115,17 +135,116 @@ class Backtester:
             logger.error(f"❌ Failed to fetch historical data: {e}")
             return None
 
+    def calculate_net_profit(self, entry_price: float, current_price: float, amount: float) -> float:
+        """
+        수수료를 포함한 순수익률 계산 (실제 트레이딩과 동일)
+        """
+        buy_cost = (entry_price * amount) * (1 + self.fee_rate)
+        sell_proceeds = (current_price * amount) * (1 - self.fee_rate)
+        net_profit_rate = (sell_proceeds - buy_cost) / buy_cost
+        return net_profit_rate
+
+    def _check_entry_conditions(self, features: Dict, prediction: int, confidence: float,
+                                 df: pd.DataFrame, i: int) -> tuple:
+        """
+        매수 조건 체크 (백테스팅용 - 일봉 데이터에 최적화)
+
+        Returns:
+            (should_buy, reason): 매수 여부와 사유
+        """
+        # 🔧 BTC 필터: BTC 하락장에서 알트코인 매수 금지 (5일로 민감도 증가)
+        if self.btc_filter_enabled and self.btc_data is not None:
+            current_date = df.index[i]
+            if current_date in self.btc_data.index:
+                btc_idx = self.btc_data.index.get_loc(current_date)
+                if btc_idx >= 5:
+                    btc_now = self.btc_data.iloc[btc_idx]['close']
+                    btc_5d_ago = self.btc_data.iloc[btc_idx - 5]['close']
+                    btc_trend = (btc_now - btc_5d_ago) / btc_5d_ago
+                    if btc_trend < self.btc_decline_threshold:  # -3%
+                        return False, f"BTC declining ({btc_trend*100:.1f}%)"
+
+        # 🔥 단순화된 지표
+        rsi = features.get('rsi', 50)
+        bb_position = features.get('bb_position', 0.5)
+        ema_9 = features.get('ema_9', 0)
+        ema_21 = features.get('ema_21', 0)
+        macd = features.get('macd', 0)
+        macd_signal = features.get('macd_signal', 0)
+
+        # 추세 확인
+        trend_up = ema_9 > ema_21  # 상승 추세
+
+        # 🔧 일봉용 급락 필터: 전일 대비 가격 변화
+        daily_change = 0
+        if i >= 1:
+            prev_close = df.iloc[i-1]['close']
+            curr_close = df.iloc[i]['close']
+            if prev_close > 0:
+                daily_change = (curr_close - prev_close) / prev_close
+        not_crashing = daily_change > -0.05  # 전일 대비 -5% 이상 급락 아님
+
+        # 과매도 조건: RSI < 35 OR BB < 0.25
+        oversold = (rsi < 35) or (bb_position < 0.25)
+
+        # MACD 골든크로스
+        macd_golden_cross = macd > macd_signal
+
+        # 최소 확신도
+        min_confidence = confidence > 0.5
+
+        # ========== 전략 1: Mean Reversion (과매도 + 급락 아님) ==========
+        # 🔧 급락 중이 아니면 과매도 매수 허용
+        if oversold and not_crashing and min_confidence:
+            return True, "Mean Reversion"
+
+        # ========== 전략 2: Momentum (MACD 골든크로스 + 상승 추세) ==========
+        if macd_golden_cross and trend_up and min_confidence:
+            return True, "MACD Momentum"
+
+        return False, ""
+
+    def _check_exit_conditions(self, position: Dict, current_price: float,
+                                features: Dict, df: pd.DataFrame, i: int) -> tuple:
+        """
+        매도 조건 체크 (일봉 백테스팅용 - 완화된 설정)
+
+        Returns:
+            (should_sell, reason, profit_rate): 매도 여부, 사유, 수익률
+        """
+        entry_price = position['entry_price']
+        amount = position['amount']
+
+        # 🔧 수수료 포함 순수익률 계산
+        profit_rate = self.calculate_net_profit(entry_price, current_price, amount)
+
+        # 🔥 단순화된 청산 조건 (3가지)
+
+        # 조건 1: 목표 수익률 (일봉용 3%)
+        if profit_rate >= self.backtest_target_profit:
+            return True, f"Target Profit ({self.backtest_target_profit*100:.1f}%)", profit_rate
+
+        # 조건 2: 손절 (일봉용 3%, 완화)
+        if profit_rate <= -self.backtest_stop_loss:
+            return True, f"Stop Loss ({self.backtest_stop_loss*100:.1f}%)", profit_rate
+
+        # 조건 3: 볼린저 밴드 상단 (과매수 청산)
+        bb_position = features.get('bb_position', 0.5)
+        if bb_position > 0.95:
+            return True, "BB Upper (Overbought)", profit_rate
+
+        return False, "", profit_rate
+
     def simulate_trade(self, df: pd.DataFrame, ticker: str = None):
         """
-        과거 데이터로 매매 시뮬레이션
+        과거 데이터로 매매 시뮬레이션 (실제 트레이딩 로직과 동일)
 
         Args:
             df: OHLCV 데이터프레임
-            ticker: 현재 백테스팅 중인 코인 (None이면 self.current_ticker 사용)
+            ticker: 현재 백테스팅 중인 코인
         """
         from .data_manager import FeatureEngineer
 
-        # 현재 코인 티커
         if ticker is None:
             ticker = self.current_ticker or (self.tickers[0] if self.tickers else "BTC")
 
@@ -155,76 +274,96 @@ class Backtester:
 
             # 디버그: 예측 결과 샘플링 (10일마다)
             if i % 10 == 0:
-                logger.debug(f"{current_date.strftime('%Y-%m-%d')} | Prediction: {prediction}, Confidence: {confidence:.2%}, Threshold: {self.bot.confidence_threshold:.2%}")
+                logger.debug(f"{current_date.strftime('%Y-%m-%d')} | Pred: {prediction}, Conf: {confidence:.2%}")
 
-            # 매수 조건: prediction=2 (좋은수익) AND confidence > 임계값 AND 포지션 없음
-            if prediction == 2 and confidence >= self.bot.confidence_threshold and self.position is None:
-                # 매수 실행
-                trade_amount = min(self.bot.trade_amount, self.capital * 0.1)
+            # 🔧 포지션 체크 (해당 코인)
+            position = self.positions.get(ticker)
 
-                if trade_amount >= 6000:  # 최소 주문 금액
-                    amount = trade_amount / current_price
-
-                    self.position = {
-                        'entry_date': current_date,
-                        'entry_price': current_price,
-                        'amount': amount,
-                        'trade_amount': trade_amount,
-                        'confidence': confidence
-                    }
-
-                    # 🔥 중요: 매수 시 자본 감소
-                    self.capital -= trade_amount
-                    self.capital_history.append(self.capital)
-
-                    logger.info(f"[매수] {current_date.strftime('%Y-%m-%d')} | {current_price:,.0f}원 | 확신도: {confidence:.2%} | 잔액: {self.capital:,.0f}원")
-
-            # 매도 조건: 포지션 있음 AND (익절 OR 손절)
-            elif self.position is not None:
-                entry_price = self.position['entry_price']
-                profit_rate = (current_price - entry_price) / entry_price
-
-                should_sell = False
-                sell_reason = ""
-
-                # 익절
-                if profit_rate >= self.bot.target_profit:
-                    should_sell = True
-                    sell_reason = f"Target Profit ({self.bot.target_profit*100:.1f}%)"
-
-                # 손절
-                elif profit_rate <= -self.bot.stop_loss:
-                    should_sell = True
-                    sell_reason = f"Stop Loss ({-self.bot.stop_loss*100:.1f}%)"
+            # ========== 매도 조건 체크 (포지션 있을 때) ==========
+            if position is not None:
+                should_sell, sell_reason, profit_rate = self._check_exit_conditions(
+                    position, current_price, features, df, i
+                )
 
                 if should_sell:
-                    # 매도 실행
-                    exit_amount = self.position['amount'] * current_price
-                    profit = exit_amount - self.position['trade_amount']
+                    # 🔧 수수료 반영 매도
+                    exit_amount = position['amount'] * current_price * (1 - self.fee_rate)
+                    entry_cost = position['trade_amount'] * (1 + self.fee_rate)
+                    profit = exit_amount - entry_cost
 
-                    # 🔥 중요: 매도 시 전체 금액 회수 (원금 + 수익/손실)
                     self.capital += exit_amount
                     self.capital_history.append(self.capital)
 
-                    # 거래 기록
                     self.trades.append({
-                        'entry_date': self.position['entry_date'],
+                        'entry_date': position['entry_date'],
                         'exit_date': current_date,
-                        'entry_price': entry_price,
+                        'entry_price': position['entry_price'],
                         'exit_price': current_price,
                         'profit_rate': profit_rate,
                         'profit': profit,
-                        'confidence': self.position['confidence'],
+                        'confidence': position['confidence'],
                         'reason': sell_reason,
-                        'ticker': ticker  # 🆕 어떤 코인인지 기록
+                        'ticker': ticker
                     })
 
-                    logger.info(f"[매도] {current_date.strftime('%Y-%m-%d')} | {current_price:,.0f}원 | 수익률: {profit_rate*100:+.2f}% | {sell_reason} | 잔액: {self.capital:,.0f}원")
+                    logger.info(f"[매도] {current_date.strftime('%Y-%m-%d')} | {ticker} | {current_price:,.0f}원 | 수익률: {profit_rate*100:+.2f}% | {sell_reason}")
 
-                    self.position = None
+                    del self.positions[ticker]
+                    continue
 
-        logger.info("=" * 60)
-        logger.info(f"✅ Simulation Complete - Total Trades: {len(self.trades)}")
+            # ========== 매수 조건 체크 (포지션 없을 때) ==========
+            if position is None:
+                should_buy, buy_reason = self._check_entry_conditions(
+                    features, prediction, confidence, df, i
+                )
+
+                if should_buy:
+                    trade_amount = min(self.bot.trade_amount, self.capital * 0.1)
+
+                    if trade_amount >= 6000 and self.capital >= trade_amount:
+                        # 🔧 수수료 반영 매수
+                        actual_cost = trade_amount * (1 + self.fee_rate)
+                        amount = trade_amount / current_price
+
+                        self.positions[ticker] = {
+                            'entry_date': current_date,
+                            'entry_price': current_price,
+                            'amount': amount,
+                            'trade_amount': trade_amount,
+                            'confidence': confidence
+                        }
+
+                        self.capital -= actual_cost
+                        self.capital_history.append(self.capital)
+
+                        logger.info(f"[매수] {current_date.strftime('%Y-%m-%d')} | {ticker} | {current_price:,.0f}원 | {buy_reason} | 확신도: {confidence:.2%}")
+
+        # 🔧 시뮬레이션 종료 시 미청산 포지션 강제 청산
+        if ticker in self.positions:
+            position = self.positions[ticker]
+            final_price = df.iloc[-1]['close']
+            profit_rate = self.calculate_net_profit(position['entry_price'], final_price, position['amount'])
+
+            exit_amount = position['amount'] * final_price * (1 - self.fee_rate)
+            self.capital += exit_amount
+            self.capital_history.append(self.capital)
+
+            self.trades.append({
+                'entry_date': position['entry_date'],
+                'exit_date': df.index[-1],
+                'entry_price': position['entry_price'],
+                'exit_price': final_price,
+                'profit_rate': profit_rate,
+                'profit': exit_amount - position['trade_amount'] * (1 + self.fee_rate),
+                'confidence': position['confidence'],
+                'reason': 'End of Period',
+                'ticker': ticker
+            })
+
+            logger.info(f"[강제청산] {ticker} | {final_price:,.0f}원 | 수익률: {profit_rate*100:+.2f}%")
+            del self.positions[ticker]
+
+        logger.info(f"✅ {ticker} Simulation Complete - Trades: {len([t for t in self.trades if t['ticker'] == ticker])}")
 
     def analyze_results(self) -> Dict:
         """
@@ -248,10 +387,11 @@ class Backtester:
                 'losses': 0,
                 'tested_coins': self.tickers,
                 'coin_count': len(self.tickers),
+                'fee_rate': self.fee_rate,
                 'message': '거래 없음 (매수 신호가 발생하지 않음)'
             }
 
-        # 승률
+        # 승률 (수수료 포함 순수익 기준)
         wins = sum(1 for t in self.trades if t['profit_rate'] > 0)
         win_rate = wins / len(self.trades)
 
@@ -281,7 +421,29 @@ class Backtester:
 
         # Sharpe Ratio (간단 버전)
         returns = [t['profit_rate'] for t in self.trades]
-        sharpe_ratio = (np.mean(returns) - 0) / np.std(returns) if len(returns) > 1 else 0
+        sharpe_ratio = (np.mean(returns) - 0) / np.std(returns) if len(returns) > 1 and np.std(returns) > 0 else 0
+
+        # 🔧 코인별 통계
+        coin_stats = {}
+        for ticker in self.tickers:
+            ticker_trades = [t for t in self.trades if t['ticker'] == ticker]
+            if ticker_trades:
+                ticker_wins = sum(1 for t in ticker_trades if t['profit_rate'] > 0)
+                coin_stats[ticker] = {
+                    'trades': len(ticker_trades),
+                    'wins': ticker_wins,
+                    'win_rate': ticker_wins / len(ticker_trades) if ticker_trades else 0,
+                    'total_profit': sum(t['profit_rate'] for t in ticker_trades)
+                }
+
+        # 🔧 매도 사유별 통계
+        reason_stats = {}
+        for trade in self.trades:
+            reason = trade['reason']
+            if reason not in reason_stats:
+                reason_stats[reason] = {'count': 0, 'total_profit': 0}
+            reason_stats[reason]['count'] += 1
+            reason_stats[reason]['total_profit'] += trade['profit_rate']
 
         results = {
             'total_trades': len(self.trades),
@@ -294,7 +456,10 @@ class Backtester:
             'max_drawdown': max_drawdown,
             'sharpe_ratio': sharpe_ratio,
             'wins': wins,
-            'losses': len(self.trades) - wins
+            'losses': len(self.trades) - wins,
+            'fee_rate': self.fee_rate,
+            'coin_stats': coin_stats,
+            'reason_stats': reason_stats
         }
 
         return results
@@ -302,7 +467,7 @@ class Backtester:
     def print_results(self, results: Dict):
         """결과 출력"""
         logger.info("=" * 60)
-        logger.info("📊 BACKTESTING RESULTS")
+        logger.info("📊 BACKTESTING RESULTS (수수료 반영)")
         logger.info("=" * 60)
         logger.info(f"총 거래 수: {results['total_trades']}건")
         logger.info(f"승: {results['wins']}건 / 패: {results['losses']}건")
@@ -314,6 +479,24 @@ class Backtester:
         logger.info(f"손익비: {results['profit_loss_ratio']:.2f}")
         logger.info(f"최대 낙폭(MDD): {results['max_drawdown']*100:.2f}%")
         logger.info(f"Sharpe Ratio: {results['sharpe_ratio']:.2f}")
+        logger.info(f"수수료율: {results.get('fee_rate', 0)*100:.2f}% (편도)")
+        logger.info("=" * 60)
+
+        # 🔧 코인별 통계 출력
+        coin_stats = results.get('coin_stats', {})
+        if coin_stats:
+            logger.info("📈 코인별 성과:")
+            for ticker, stats in coin_stats.items():
+                logger.info(f"   {ticker}: {stats['trades']}건, 승률 {stats['win_rate']*100:.1f}%, 총수익 {stats['total_profit']*100:+.2f}%")
+
+        # 🔧 매도 사유별 통계 출력
+        reason_stats = results.get('reason_stats', {})
+        if reason_stats:
+            logger.info("📊 매도 사유별 통계:")
+            for reason, stats in reason_stats.items():
+                avg_profit = stats['total_profit'] / stats['count'] if stats['count'] > 0 else 0
+                logger.info(f"   {reason}: {stats['count']}건, 평균수익 {avg_profit*100:+.2f}%")
+
         logger.info("=" * 60)
 
         # 평가
@@ -334,11 +517,30 @@ class Backtester:
             self.status = "running"
             self.progress = 0
 
+            # 🔧 상태 초기화 (재실행 시 필요)
+            self.capital = self.initial_capital
+            self.positions = {}
+            self.trades = []
+            self.capital_history = [self.initial_capital]
+
             logger.info("=" * 60)
-            logger.info(f"🚀 Starting Multi-Coin Backtesting")
+            logger.info(f"🚀 Starting Multi-Coin Backtesting (v2.1 - Simplified)")
             logger.info(f"   Coins: {', '.join(self.tickers)} ({len(self.tickers)}개)")
             logger.info(f"   Period: {self.days} days")
+            logger.info(f"   Fee Rate: {self.fee_rate*100:.2f}% (편도)")
+            logger.info(f"   Target: +{self.backtest_target_profit*100:.0f}% / Stop: -{self.backtest_stop_loss*100:.0f}%")
+            logger.info(f"   BTC Filter: {'ON' if self.btc_filter_enabled else 'OFF'}")
             logger.info("=" * 60)
+
+            # 🔧 BTC 데이터 미리 로드 (필터용)
+            if self.btc_filter_enabled:
+                logger.info("📊 Loading BTC data for market filter...")
+                self.btc_data = self.fetch_historical_data("BTC", self.days)
+                if self.btc_data is not None:
+                    logger.info(f"   ✅ BTC data loaded: {len(self.btc_data)} days")
+                else:
+                    logger.warning("   ⚠️ BTC data not available, disabling filter")
+                    self.btc_filter_enabled = False
 
             # 각 코인마다 백테스팅 실행
             for idx, ticker in enumerate(self.tickers):

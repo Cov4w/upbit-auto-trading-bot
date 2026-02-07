@@ -24,7 +24,7 @@ from dotenv import load_dotenv
 import pandas as pd
 import numpy as np
 
-from .data_manager import TradeMemory, ModelLearner, FeatureEngineer
+from .data_manager import TradeMemory, ModelLearner, FeatureEngineer, sanitize_dict_for_json
 from .coin_selector import CoinSelector
 from .exchange_manager import ExchangeManager
 from .capital_manager import CapitalManager
@@ -88,9 +88,8 @@ class TradingBot:
         self.confidence_threshold = float(os.getenv("MODEL_CONFIDENCE_THRESHOLD", 0.7))
         
         # 🆕 Trailing Stop Loss Configuration
-        self.trailing_stop_enabled = True
-        self.trailing_activation = 0.015  # 1.5% 수익 시 트레일링 활성화
-        self.trailing_distance = 0.01      # peak 대비 -1% 하락 시 매도
+        # Trailing Stop 비활성화 (단순화)
+        self.trailing_stop_enabled = False
 
         # 🚀 Advanced Profit Logic Configuration
         self.fee_rate = 0.0005  # 거래소 수수료 (0.05% 편도, 업비트 기준)
@@ -153,6 +152,7 @@ class TradingBot:
         # 🔄 Auto Recommendation Timer (5분마다 자동 업데이트 + 1위 종목 추가)
         self.auto_recommendation_enabled = True
         self.auto_recommendation_interval = 30  # 30초 (더 빠른 업데이트)
+        self.auto_remove_from_watchlist = True  # 🔧 Top5에서 빠지면 자동 제거 (활성화)
         self.auto_timer_thread = None
         
         # 🔄 봇 초기화 시 포지션 자동 복구 (START 버튼 전에도 보유 코인 감지)
@@ -502,14 +502,26 @@ class TradingBot:
                     del self.failed_buy_cooldown[ticker]
                     logger.info(f"🔓 {ticker} buy cooldown released.")
 
-            # 1. 비트코인 상관관계 체크: BTC 하락 시 알트코인 진입 금지
+            # 1. 비트코인 상관관계 체크: BTC 하락 시 알트코인 진입 금지 (하이브리드 방식)
             if ticker != 'BTC':  # BTC 자체는 체크 안 함
-                btc_df = self.exchange.get_ohlcv('BTC')
-                if btc_df is not None and len(btc_df) >= 10:
-                    # 최근 10봉 BTC 추세 확인
-                    btc_trend = (btc_df['close'].iloc[-1] - btc_df['close'].iloc[-10]) / btc_df['close'].iloc[-10]
-                    if btc_trend < -0.03:  # BTC 3% 이상 하락 중
-                        logger.debug(f"🚫 [{ticker}] BTC declining {btc_trend*100:.1f}%. Skipping altcoin entry.")
+                # 🔧 조건 1: 전일 대비 -3% 체크
+                btc_daily = self.exchange.get_ohlcv('BTC', interval='day')
+                if btc_daily is not None and len(btc_daily) >= 2:
+                    btc_today = btc_daily['close'].iloc[-1]
+                    btc_yesterday = btc_daily['close'].iloc[-2]
+                    btc_daily_trend = (btc_today - btc_yesterday) / btc_yesterday
+                    if btc_daily_trend < -0.03:  # 전일 대비 -3%
+                        logger.debug(f"🚫 [{ticker}] BTC declining {btc_daily_trend*100:.1f}% (vs yesterday). Skipping altcoin entry.")
+                        return
+
+                # 🔧 조건 2: 당일 급락 -5% 체크 (분봉 기준)
+                btc_minute = self.exchange.get_ohlcv('BTC')
+                if btc_minute is not None and len(btc_minute) >= 60:
+                    btc_now = btc_minute['close'].iloc[-1]
+                    btc_1h_ago = btc_minute['close'].iloc[-60]  # 1시간 전
+                    btc_intraday_trend = (btc_now - btc_1h_ago) / btc_1h_ago
+                    if btc_intraday_trend < -0.05:  # 1시간 내 -5%
+                        logger.debug(f"🚫 [{ticker}] BTC flash crash {btc_intraday_trend*100:.1f}% (1h). Skipping altcoin entry.")
                         return
 
             # 2. 현재 데이터 수집
@@ -540,42 +552,26 @@ class TradingBot:
             features_df = FeatureEngineer.features_to_dataframe(features)
             prediction, confidence = self.learner.predict(features_df)
             
-            # 4. 매수 조건 평가 (🆕 다양화된 진입 조건)
+            # 4. 매수 조건 평가 (단순화)
             rsi = features['rsi']
             bb_position = features['bb_position']
-            rsi_change = features.get('rsi_change', 0)
-            volume_trend = features.get('volume_trend', 0)
-            
-            # 🆕 추세 필터: 하락 추세에서 "떨어지는 칼 잡기" 방지
+
+            # 🔥 단순화된 지표 (과적합 방지)
             ema_9 = features.get('ema_9', 0)
             ema_21 = features.get('ema_21', 0)
-            price_change_15m = features.get('price_change_15m', 0)
+            macd = features.get('macd', 0)
+            macd_signal_val = features.get('macd_signal', 0)
 
-            # 추세 확인: EMA 골든크로스 또는 15분 가격 변화가 -2% 이상 (완만한 하락 또는 상승)
-            trend_up = (ema_9 > ema_21) or (price_change_15m > -0.02)
+            # 추세 확인
+            trend_up = ema_9 > ema_21  # 상승 추세
+            price_change = features.get('price_change_15m', 0)
+            not_crashing = price_change > -0.05  # 급락 아님 (-5% 이상)
 
-            # ❄️ Hybrid Mode: AI가 없거나 확신이 없어도, 기술적 지표가 강력하면 매수 (데이터 수집 겸용)
-            # 조건: RSI 30 미만(과매도) AND 반등 시작(Change>0) AND 볼린저 하단 AND 추세 필터
-            is_strong_technical_signal = (rsi < 30) and (rsi_change > 0) and (bb_position < 0.2) and trend_up
+            # 과매도 조건: RSI < 35 OR BB < 0.25
+            oversold = (rsi < 35) or (bb_position < 0.25)
 
-            if is_strong_technical_signal:
-                logger.info(f"💎 Technical Value Buy: {ticker} (RSI={rsi:.1f}, Change={rsi_change:.1f}, Trend=UP) - AI Override")
-                self._execute_buy(ticker, features, 0.5)  # 확신도 0.5(중립)로 진입
-                return
-            
-            # 🔧 확신도 기반 시그널 (클래스 수에 상관없이 작동)
-            # confidence는 "좋은 수익" 확률 (class 2 또는 class 1)
-            ai_profit_signal = confidence > self.confidence_threshold
-
-            # Mean Reversion 시그널 (과매도 또는 볼린저 하단) + 추세 필터
-            oversold = (rsi < 30) or (bb_position < 0.2)
-            oversold_with_trend = oversold and trend_up  # 🔥 추세 필터 적용
-
-            # 🆕 모멘텀 시그널: RSI가 상승 중 (과매도 회복 패턴)
-            momentum_signal = (rsi < 40) and (rsi_change > 2)  # RSI 35 이하에서 상승 중
-
-            # 🆕 거래량 시그널: 거래량 증가 중
-            volume_signal = volume_trend > 0.2  # 거래량 20% 증가
+            # MACD 골든크로스
+            macd_golden_cross = macd > macd_signal_val
             
             # 🛡️ 중복 매수 방지: 이미 포지션이 있으면 스킵
             if ticker in self.positions:
@@ -640,25 +636,27 @@ class TradingBot:
                 # 출처 범위를 알 수 없으므로 수동으로 추가하지 않음
                 # (다음 스캔 때 Top 5에 들면 자동으로 추가됨)
             
-            # 🆕 다양화된 매수 조건 (3가지 시나리오) + 추세 필터
-            # 시나리오 1: AI가 좋은 수익 예측 + 과매도 + 추세 필터
-            condition_1 = ai_profit_signal and oversold_with_trend
+            # 🔥 단순화된 매수 조건 (2가지 전략 OR)
+            # 최소 확신도: AI가 "큰 손실" 예측이 아니면 진입 허용
+            min_confidence = confidence > 0.5  # 50% 이상 (중립 이상)
 
-            # 시나리오 2: AI 매우 높은 확신도(90%+) + 추세 필터 → 과매도 조건 완화
-            condition_2 = (confidence > 0.90) and trend_up
+            # ========== 전략 1: Mean Reversion (과매도 + 급락 아님) ==========
+            # 조건: (RSI < 35 OR BB < 0.25) + 급락 아님 + 최소 확신도
+            mean_reversion = oversold and not_crashing and min_confidence
 
-            # 시나리오 3: 과매도 회복 패턴 (RSI 상승 + 거래량 증가) + 추세 필터
-            condition_3 = oversold_with_trend and momentum_signal and volume_signal and (confidence > 0.7)
-            
-            if condition_1 or condition_2 or condition_3:
-                reason = "AI+Oversold" if condition_1 else ("High Confidence" if condition_2 else "Momentum Recovery")
-                logger.info(f"✅ [{ticker}] Entry Signal: {reason} (Conf={confidence:.1%}, RSI={rsi:.1f})")
+            # ========== 전략 2: Momentum (MACD 골든크로스 + 상승 추세) ==========
+            # 조건: MACD > Signal + 상승 추세(EMA9 > EMA21) + 최소 확신도
+            momentum_strategy = macd_golden_cross and trend_up and min_confidence
+
+            if mean_reversion or momentum_strategy:
+                reason = "Mean Reversion" if mean_reversion else "MACD Momentum"
+                logger.info(f"✅ [{ticker}] Entry: {reason} (Conf={confidence:.1%}, RSI={rsi:.1f}, MACD={macd:.4f})")
                 self._execute_buy(ticker, features, confidence)
             else:
                 logger.debug(
-                    f"📊 [{ticker}] No Entry Signal - "
-                    f"Pred:{prediction}, Conf:{confidence:.2%}, "
-                    f"RSI:{rsi:.1f}, BB:{bb_position:.2f}"
+                    f"📊 [{ticker}] No Signal - "
+                    f"Conf:{confidence:.1%}, RSI:{rsi:.1f}, BB:{bb_position:.2f}, "
+                    f"MACD:{macd:.4f}, Trend:{'↑' if trend_up else '↓'}"
                 )
         
         except Exception as e:
@@ -905,58 +903,28 @@ class TradingBot:
                 f"{profit_label}:{profit_rate*100:.2f}% (Target:>{target_profit*100:.1f}%)"
             )
             
-            # 2. 현재 데이터 수집 (Emergency Check를 위해 미리 로드)
-            df = self.exchange.get_ohlcv(ticker)
+            # 🔥 단순화된 청산 조건 (3가지)
             should_exit = False
             exit_reason = ""
-            
-            # 🚨 0순위: Emergency Exit (Flash Crash)
-            # 현재 캔들 시가 대비 3% 이상 급락 시 즉시 탈출
-            if df is not None and not df.empty:
-                last_candle = df.iloc[-1]
-                candle_open = last_candle['open']
-                if candle_open > 0:
-                    candle_drop = (current_price - candle_open) / candle_open
-                    if candle_drop < -0.03:  # -3% 급락
-                        logger.warning(f"🚨 [{ticker}] Emergency Exit Triggered! Drop {candle_drop*100:.1f}%")
-                        self._execute_sell(ticker, current_price, f"🚨 FLASH CRASH (Drop {candle_drop*100:.1f}%)")
-                        return
 
-            # 조건 1: 목표 수익률 (Emergency가 아닐 때만 체크)
+            # 조건 1: 목표 수익률
             if profit_rate >= target_profit:
                 should_exit = True
                 exit_reason = f"Target Profit ({target_profit*100:.1f}%)"
-            
+
             # 조건 2: 손절
             elif profit_rate <= -self.stop_loss:
                 should_exit = True
-                exit_reason = f"Stop Loss ({-self.stop_loss*100}%)"
-            
-            # 🆕 조건 2.5: Trailing Stop Loss
-            elif self.trailing_stop_enabled and profit_rate >= self.trailing_activation:
-                # Peak 가격 추적
-                if 'peak_price' not in position:
-                    position['peak_price'] = entry_price
-                
-                if current_price > position['peak_price']:
-                    position['peak_price'] = current_price
-                    logger.debug(f"🔼 [{ticker}] New Peak: {current_price:,.0f} (+{profit_rate*100:.2f}%)")
-                
-                # Peak 대비 하락률 체크
-                trailing_stop_price = position['peak_price'] * (1 - self.trailing_distance)
-                
-                if current_price < trailing_stop_price:
-                    peak_profit = (position['peak_price'] - entry_price) / entry_price
-                    should_exit = True
-                    exit_reason = f"Trailing Stop (Peak={position['peak_price']:,.0f}, +{peak_profit*100:.1f}%)"
-                    logger.info(f"🔔 [{ticker}] Trailing Stop Triggered! Peak={position['peak_price']:,.0f}, Current={current_price:,.0f}")
-            
-            # 조건 3: 볼린저 밴드 상단 (타이밍 매도)
-            elif df is not None and len(df) >= 20:
-                features = FeatureEngineer.extract_features(df)
-                if features.get('bb_position', 0) > 0.95:  # 상단 5% 이내
-                    should_exit = True
-                    exit_reason = "Bollinger Band Upper"
+                exit_reason = f"Stop Loss ({self.stop_loss*100:.1f}%)"
+
+            # 조건 3: 볼린저 밴드 상단 (과매수 청산)
+            else:
+                df = self.exchange.get_ohlcv(ticker)
+                if df is not None and len(df) >= 20:
+                    features = FeatureEngineer.extract_features(df)
+                    if features.get('bb_position', 0) > 0.95:
+                        should_exit = True
+                        exit_reason = "BB Upper (Overbought)"
             
             # 3. 매도 실행
             if should_exit:
@@ -1295,28 +1263,30 @@ class TradingBot:
                     logger.info(f"   ✅ [{ticker}] Added to watch list (from range {current_scan_range[0]}-{current_scan_range[1]})")
 
             # 2️⃣ 출처 범위가 현재 스캔 범위인 티커 중 Top 5에서 빠진 것 즉시 제거
-            tickers_to_remove = []
+            # 🔧 auto_remove_from_watchlist가 True일 때만 실행
+            if self.auto_remove_from_watchlist:
+                tickers_to_remove = []
 
-            for ticker in self.tickers[:]:  # 복사본으로 순회
-                ticker_origin = self.ticker_origin_range.get(ticker)
+                for ticker in self.tickers[:]:  # 복사본으로 순회
+                    ticker_origin = self.ticker_origin_range.get(ticker)
 
-                # 📌 핵심: 이 티커의 출처 범위가 현재 스캔 범위와 같을 때만 체크
-                if ticker_origin == current_scan_range:
-                    if ticker not in top_5_tickers:
-                        # 출처 범위의 Top 5에서 빠짐 → 즉시 제거
-                        # 포지션 체크: 보유 중이면 제거 안 함
-                        if ticker in self.positions:
-                            logger.info(f"   🔒 [{ticker}] Not in Top 5 but has active position - keeping in watch list")
-                        else:
-                            tickers_to_remove.append(ticker)
-                            logger.info(f"   ⚠️ [{ticker}] Not in Top 5 of origin range {ticker_origin[0]}-{ticker_origin[1]} - will be removed")
+                    # 📌 핵심: 이 티커의 출처 범위가 현재 스캔 범위와 같을 때만 체크
+                    if ticker_origin == current_scan_range:
+                        if ticker not in top_5_tickers:
+                            # 출처 범위의 Top 5에서 빠짐 → 즉시 제거
+                            # 포지션 체크: 보유 중이면 제거 안 함
+                            if ticker in self.positions:
+                                logger.info(f"   🔒 [{ticker}] Not in Top 5 but has active position - keeping in watch list")
+                            else:
+                                tickers_to_remove.append(ticker)
+                                logger.info(f"   ⚠️ [{ticker}] Not in Top 5 of origin range {ticker_origin[0]}-{ticker_origin[1]} - will be removed")
 
-            # 3️⃣ 제거 실행
-            for ticker in tickers_to_remove:
-                self.tickers.remove(ticker)
-                if ticker in self.ticker_origin_range:
-                    del self.ticker_origin_range[ticker]  # 출처 범위 삭제
-                logger.info(f"   ❌ [{ticker}] Removed from watch list")
+                # 3️⃣ 제거 실행
+                for ticker in tickers_to_remove:
+                    self.tickers.remove(ticker)
+                    if ticker in self.ticker_origin_range:
+                        del self.ticker_origin_range[ticker]  # 출처 범위 삭제
+                    logger.info(f"   ❌ [{ticker}] Removed from watch list")
 
             # 결과 요약
             logger.info(f"📊 Watch List Status: {len(self.tickers)} tickers {self.tickers}")
@@ -1380,7 +1350,7 @@ class TradingBot:
         with self._tickers_lock:  # 🔒 Thread-safe read
             tickers_snapshot = self.tickers[:]
 
-        return {
+        status = {
             "is_running": self.is_running,
             "tickers": tickers_snapshot,
             "use_ai_selection": self.use_ai_selection,
@@ -1404,6 +1374,9 @@ class TradingBot:
             "use_dynamic_target": self.use_dynamic_target,
             "use_dynamic_sizing": self.use_dynamic_sizing,
         }
+
+        # JSON 직렬화를 위해 nan/inf 값 정제
+        return sanitize_dict_for_json(status)
 
 
     
